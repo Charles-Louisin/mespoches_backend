@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import Joi from 'joi';
 import Wallet from '../models/Wallet';
 import Transaction from '../models/Transaction';
+import PlannedExpense from '../models/PlannedExpense';
 import { protect, sendLimitError } from '../middleware/auth';
 import { PLAN_LIMITS } from '../config/planLimits';
 import {
@@ -9,6 +10,7 @@ import {
   getFreeHistoryStartDate,
   stripImageUrlIfFree,
 } from '../utils/subscription';
+import { getTotalSavings } from '../utils/savingsAllocation';
 
 const router = Router();
 
@@ -52,10 +54,13 @@ router.get('/total-balance', protect, async (req: Request, res: Response) => {
       is_deleted: { $ne: true },
     });
     const total = wallets.reduce((sum, w) => sum + w.current_balance, 0);
+    const totalSavings = isPremiumUser(req.user!)
+      ? await getTotalSavings(req.user!._id)
+      : 0;
 
     return res.json({
       success: true,
-      data: { total, wallets },
+      data: { total, totalSavings, wallets },
     });
   } catch (error) {
     console.error('Erreur total-balance:', error);
@@ -134,9 +139,18 @@ router.get('/:id/history', protect, async (req: Request, res: Response) => {
       .populate('category_id')
       .sort({ date: -1 });
 
+    const planned_expenses = await PlannedExpense.find({
+      user_id: req.user!._id,
+      wallet_id: req.params.id,
+      status: 'scheduled',
+    })
+      .populate('wallet_id')
+      .populate('category_id')
+      .sort({ scheduled_date: 1, created_at: 1 });
+
     return res.json({
       success: true,
-      data: { wallet, transactions },
+      data: { wallet, transactions, planned_expenses },
     });
   } catch (error) {
     console.error('Erreur wallet history:', error);
@@ -181,10 +195,12 @@ router.post('/', protect, async (req: Request, res: Response) => {
       );
     }
 
+    const userCurrency = req.user!.currency || 'XAF';
+
     const wallet = await Wallet.create({
       user_id: req.user!._id,
       name: payload.name,
-      currency: payload.currency || 'XAF',
+      currency: userCurrency,
       image_url: payload.image_url || null,
       current_balance: 0,
     });
@@ -226,7 +242,6 @@ router.put('/:id', protect, async (req: Request, res: Response) => {
     }
 
     if (value.name) wallet.name = value.name;
-    if (value.currency) wallet.currency = value.currency;
     if (value.image_url !== undefined) {
       if (!isPremiumUser(req.user!) && value.image_url) {
         return sendLimitError(

@@ -8,6 +8,7 @@ import Category from '../models/Category';
 import Budget from '../models/Budget';
 import SavingsGoal from '../models/SavingsGoal';
 import RecurringTransaction from '../models/RecurringTransaction';
+import PlannedExpense from '../models/PlannedExpense';
 import { protect } from '../middleware/auth';
 import { toPublicUser } from '../utils/userPayload';
 import {
@@ -26,10 +27,18 @@ const generateToken = (user: IUser): string => {
   );
 };
 
+const CURRENCY_VALUES = ['XAF', 'XOF', 'EURO', 'DOLLARS'];
+
 const registerSchema = Joi.object({
   email: Joi.string().email().required(),
   password: Joi.string().min(6).required(),
   name: Joi.string().allow('', null),
+  currency: Joi.string().valid(...CURRENCY_VALUES).optional(),
+});
+
+const updateMeSchema = Joi.object({
+  currency: Joi.string().valid(...CURRENCY_VALUES),
+  hidePlannedExpensesHelp: Joi.boolean(),
 });
 
 const loginSchema = Joi.object({
@@ -128,6 +137,7 @@ router.post('/register', async (req: Request, res: Response) => {
       name: nameNorm || name,
       role: 'user',
       emailVerified: false,
+      currency: value.currency || 'XAF',
     });
 
     await setVerificationCode(user);
@@ -354,6 +364,45 @@ router.get('/me', protect, async (req: Request, res: Response) => {
   }
 });
 
+router.patch('/me', protect, async (req: Request, res: Response) => {
+  try {
+    const { error, value } = updateMeSchema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+
+    const user = req.user!;
+    if (value.currency) {
+      user.currency = value.currency;
+      await Wallet.updateMany(
+        { user_id: user._id, is_deleted: { $ne: true } },
+        { currency: value.currency }
+      );
+    }
+    if (value.hidePlannedExpensesHelp !== undefined) {
+      user.hidePlannedExpensesHelp = value.hidePlannedExpensesHelp;
+    }
+
+    if (value.currency || value.hidePlannedExpensesHelp !== undefined) {
+      await user.save();
+    }
+
+    return res.json({
+      success: true,
+      data: toPublicUser(user),
+    });
+  } catch (error) {
+    console.error('Erreur patch me:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Erreur lors de la mise à jour du profil',
+    });
+  }
+});
+
 router.delete('/me', protect, async (req: Request, res: Response) => {
   try {
     const userId = req.user!._id;
@@ -365,6 +414,7 @@ router.delete('/me', protect, async (req: Request, res: Response) => {
       Budget.deleteMany({ user_id: userId }),
       SavingsGoal.deleteMany({ user_id: userId }),
       RecurringTransaction.deleteMany({ user_id: userId }),
+      PlannedExpense.deleteMany({ user_id: userId }),
       User.deleteOne({ _id: userId }),
     ]);
 

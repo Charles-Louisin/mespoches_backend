@@ -20,6 +20,8 @@ export interface IUser extends Document {
   plan: UserPlan;
   premiumUntil: Date | null;
   name?: string;
+  currency: string;
+  hidePlannedExpensesHelp: boolean;
   lastLoginAt: Date | null;
   loginHistory: ILoginHistoryEntry[];
   created_at: Date;
@@ -76,6 +78,15 @@ const userSchema = new Schema<IUser>(
     name: {
       type: String,
       trim: true,
+    },
+    currency: {
+      type: String,
+      enum: ['XAF', 'XOF', 'EURO', 'DOLLARS'],
+      default: 'XAF',
+    },
+    hidePlannedExpensesHelp: {
+      type: Boolean,
+      default: false,
     },
     lastLoginAt: {
       type: Date,

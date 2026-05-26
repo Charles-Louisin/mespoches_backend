@@ -5,6 +5,8 @@ import Transaction, { ITransaction, TransactionType } from '../models/Transactio
 import Wallet from '../models/Wallet';
 import { protect, sendLimitError } from '../middleware/auth';
 import { isPremiumUser, getFreeHistoryStartDate } from '../utils/subscription';
+import { allocateToSavingsGoal } from '../utils/savingsAllocation';
+import { isFutureUtcDay } from '../utils/plannedExpenseDates';
 
 const router = Router();
 
@@ -16,12 +18,17 @@ const baseSchema = {
   date: Joi.date().iso().optional(),
 };
 
-const incomeSchema = Joi.object(baseSchema);
+const incomeSchema = Joi.object({
+  ...baseSchema,
+  wallet_id: Joi.string().allow(null, ''),
+  savings_goal_id: Joi.string().allow(null, ''),
+});
 const expenseSchema = Joi.object(baseSchema);
 const transferSchema = Joi.object({
   amount: Joi.number().positive().required(),
   wallet_id: Joi.string().required(),
-  destination_wallet_id: Joi.string().required(),
+  destination_wallet_id: Joi.string().allow(null, ''),
+  savings_goal_id: Joi.string().allow(null, ''),
   description: Joi.string().allow('', null),
   date: Joi.date().iso().optional(),
 });
@@ -32,6 +39,7 @@ interface TransactionInput {
   category_id?: string | null;
   description?: string | null;
   date?: Date;
+  savings_goal_id?: string | null;
 }
 
 async function createTransactionAndUpdateWallet({
@@ -116,6 +124,7 @@ router.get('/', protect, async (req: Request, res: Response) => {
       .populate('wallet_id')
       .populate('destination_wallet_id')
       .populate('category_id')
+      .populate('savings_goal_id')
       .sort({ date: -1 });
 
     const seenTransferKeys = new Set<string>();
@@ -280,6 +289,38 @@ router.post('/income', protect, async (req: Request, res: Response) => {
       });
     }
 
+    if (value.savings_goal_id) {
+      if (!isPremiumUser(req.user!)) {
+        return sendLimitError(
+          res,
+          'L\'épargne est réservée aux abonnés Premium.',
+          { premium: true }
+        );
+      }
+      const transaction = await allocateToSavingsGoal({
+        userId: req.user!._id,
+        type: 'income',
+        amount: value.amount,
+        wallet_id: value.wallet_id || null,
+        savings_goal_id: value.savings_goal_id,
+        category_id: value.category_id,
+        description: value.description,
+        date: value.date,
+      });
+      const populated = await Transaction.findById(transaction._id)
+        .populate('wallet_id')
+        .populate('category_id')
+        .populate('savings_goal_id');
+      return res.status(201).json({ success: true, data: populated });
+    }
+
+    if (!value.wallet_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Poche requise',
+      });
+    }
+
     const transaction = await createTransactionAndUpdateWallet({
       userId: req.user!._id,
       type: 'income',
@@ -288,7 +329,8 @@ router.post('/income', protect, async (req: Request, res: Response) => {
 
     const populated = await Transaction.findById(transaction._id)
       .populate('wallet_id')
-      .populate('category_id');
+      .populate('category_id')
+      .populate('savings_goal_id');
 
     return res.status(201).json({ success: true, data: populated });
   } catch (error) {
@@ -306,6 +348,14 @@ router.post('/expense', protect, async (req: Request, res: Response) => {
       return res.status(400).json({
         success: false,
         message: error.details[0].message,
+      });
+    }
+
+    if (value.date && isFutureUtcDay(value.date)) {
+      return res.status(400).json({
+        success: false,
+        message:
+          'Pour une dépense future, enregistrez-la comme dépense prévue (date ultérieure en UTC).',
       });
     }
 
@@ -343,6 +393,36 @@ router.post('/transfer', protect, async (req: Request, res: Response) => {
       return res.status(400).json({
         success: false,
         message: error.details[0].message,
+      });
+    }
+
+    const toSavings = Boolean(value.savings_goal_id);
+    const toWallet = Boolean(value.destination_wallet_id);
+    if (toSavings === toWallet) {
+      return res.status(400).json({
+        success: false,
+        message: toSavings
+          ? 'Destination invalide'
+          : 'Choisissez une poche de destination ou un objectif d\'épargne',
+      });
+    }
+
+    if (toSavings) {
+      const transaction = await allocateToSavingsGoal({
+        userId: req.user!._id,
+        type: 'expense',
+        amount: value.amount,
+        wallet_id: value.wallet_id,
+        savings_goal_id: value.savings_goal_id,
+        description: value.description,
+        date: value.date,
+      });
+      const populated = await Transaction.findById(transaction._id)
+        .populate('wallet_id')
+        .populate('savings_goal_id');
+      return res.status(201).json({
+        success: true,
+        data: { debit: populated, credit: null },
       });
     }
 

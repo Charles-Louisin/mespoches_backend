@@ -6,11 +6,12 @@ export interface ITransaction extends Document {
   user_id: Types.ObjectId;
   type: TransactionType;
   amount: number;
-  wallet_id: Types.ObjectId;
+  wallet_id: Types.ObjectId | null;
   destination_wallet_id: Types.ObjectId | null;
   transfer_group_id: Types.ObjectId | null;
   is_transfer_mirror: boolean;
   category_id: Types.ObjectId | null;
+  savings_goal_id: Types.ObjectId | null;
   description: string;
   date: Date;
   balance_before: number;
@@ -38,7 +39,7 @@ const transactionSchema = new Schema<ITransaction>(
     wallet_id: {
       type: Schema.Types.ObjectId,
       ref: 'Wallet',
-      required: [true, 'Le portefeuille source est requis'],
+      default: null,
     },
     destination_wallet_id: {
       type: Schema.Types.ObjectId,
@@ -59,6 +60,12 @@ const transactionSchema = new Schema<ITransaction>(
       type: Schema.Types.ObjectId,
       ref: 'Category',
       default: null,
+    },
+    savings_goal_id: {
+      type: Schema.Types.ObjectId,
+      ref: 'SavingsGoal',
+      default: null,
+      index: true,
     },
     description: {
       type: String,

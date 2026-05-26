@@ -14,6 +14,9 @@ import savingsGoalRoutes from './routes/savingsGoalRoutes';
 import recurringRoutes from './routes/recurringRoutes';
 import exportRoutes from './routes/exportRoutes';
 import subscriptionRoutes from './routes/subscriptionRoutes';
+import webhookRoutes from './routes/webhookRoutes';
+import plannedExpenseRoutes from './routes/plannedExpenseRoutes';
+import { startPlannedExpenseScheduler } from './jobs/plannedExpenseScheduler';
 
 const app = express();
 
@@ -65,6 +68,8 @@ app.use('/api/savings-goals', savingsGoalRoutes);
 app.use('/api/recurring', recurringRoutes);
 app.use('/api/export', exportRoutes);
 app.use('/api/subscription', subscriptionRoutes);
+app.use('/api/webhooks', webhookRoutes);
+app.use('/api/planned-expenses', plannedExpenseRoutes);
 
 function logStartupBanner(mongoOk: boolean): void {
   const line = '─'.repeat(42);
@@ -77,6 +82,12 @@ function logStartupBanner(mongoOk: boolean): void {
   if (process.env.CORS_ORIGIN) {
     console.log(`  CORS          : ${process.env.CORS_ORIGIN}`);
   }
+  if (process.env.APP_URL) {
+    console.log(`  Frontend URL  : ${process.env.APP_URL}`);
+  }
+  console.log(
+    `  CinetPay      : ${process.env.CINETPAY_API_KEY ? '✅ configuré' : '⚠️  non configuré'}`
+  );
 
   if (mongoOk) {
     const { host, name, port } = mongoose.connection;
@@ -118,6 +129,7 @@ async function startServer(): Promise<void> {
   logStartupBanner(true);
 
   app.listen(PORT, () => {
+    startPlannedExpenseScheduler();
     if (!isProduction) {
       console.log(`👀 Mode ${NODE_ENV} — logs détaillés activés (morgan)\n`);
     }
