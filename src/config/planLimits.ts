@@ -1,5 +1,4 @@
 export const PLAN_LIMITS = {
-  FREE_MAX_WALLETS: 3,
   FREE_MAX_CATEGORIES_PER_TYPE: 10,
   FREE_HISTORY_MONTHS: 3,
 } as const;

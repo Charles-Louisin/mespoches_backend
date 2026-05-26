@@ -4,7 +4,6 @@ import Wallet from '../models/Wallet';
 import Transaction from '../models/Transaction';
 import PlannedExpense from '../models/PlannedExpense';
 import { protect, sendLimitError } from '../middleware/auth';
-import { PLAN_LIMITS } from '../config/planLimits';
 import {
   isPremiumUser,
   getFreeHistoryStartDate,
@@ -169,21 +168,6 @@ router.post('/', protect, async (req: Request, res: Response) => {
         success: false,
         message: error.details[0].message,
       });
-    }
-
-    const walletCount = await Wallet.countDocuments({
-      user_id: req.user!._id,
-      is_deleted: { $ne: true },
-    });
-    if (
-      !isPremiumUser(req.user!) &&
-      walletCount >= PLAN_LIMITS.FREE_MAX_WALLETS
-    ) {
-      return sendLimitError(
-        res,
-        `Limite atteinte : ${PLAN_LIMITS.FREE_MAX_WALLETS} poches maximum en version gratuite. Passez à Premium pour en créer davantage.`,
-        { premium: true }
-      );
     }
 
     const payload = stripImageUrlIfFree(req.user!, value);
