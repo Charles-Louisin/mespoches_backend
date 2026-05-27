@@ -3,6 +3,7 @@ import Joi from 'joi';
 import mongoose, { FilterQuery, Types } from 'mongoose';
 import Transaction, { ITransaction, TransactionType } from '../models/Transaction';
 import Wallet from '../models/Wallet';
+import SavingsGoal from '../models/SavingsGoal';
 import { protect, sendLimitError } from '../middleware/auth';
 import { isPremiumUser, getFreeHistoryStartDate } from '../utils/subscription';
 import { allocateToSavingsGoal } from '../utils/savingsAllocation';
@@ -89,6 +90,136 @@ async function createTransactionAndUpdateWallet({
   await wallet.save();
 
   return transaction;
+}
+
+async function reverseSimpleTransaction(
+  transaction: ITransaction,
+  userId: Types.ObjectId
+): Promise<void> {
+  if (transaction.savings_goal_id) {
+    const goal = await SavingsGoal.findOne({
+      _id: transaction.savings_goal_id,
+      user_id: userId,
+    });
+    if (!goal) {
+      throw new Error("Objectif d'épargne introuvable");
+    }
+    const newSaved = (goal.saved_amount ?? 0) - transaction.amount;
+    if (newSaved < 0) {
+      throw new Error(
+        'Impossible de supprimer : montant déjà retiré de cet objectif'
+      );
+    }
+    goal.saved_amount = newSaved;
+    await goal.save();
+
+    if (transaction.wallet_id && transaction.type === 'expense') {
+      const wallet = await Wallet.findOne({
+        _id: transaction.wallet_id,
+        user_id: userId,
+        is_deleted: { $ne: true },
+      });
+      if (!wallet) {
+        throw new Error('Portefeuille introuvable');
+      }
+      wallet.current_balance += transaction.amount;
+      await wallet.save();
+    }
+    return;
+  }
+
+  if (!transaction.wallet_id) {
+    throw new Error('Transaction invalide');
+  }
+
+  const wallet = await Wallet.findOne({
+    _id: transaction.wallet_id,
+    user_id: userId,
+    is_deleted: { $ne: true },
+  });
+  if (!wallet) {
+    throw new Error('Portefeuille introuvable');
+  }
+
+  if (transaction.type === 'income') {
+    wallet.current_balance -= transaction.amount;
+    if (wallet.current_balance < 0) {
+      throw new Error(
+        'Impossible de supprimer : solde de la poche insuffisant'
+      );
+    }
+  } else if (transaction.type === 'expense') {
+    wallet.current_balance += transaction.amount;
+  } else {
+    throw new Error('Type de transaction non supporté');
+  }
+
+  await wallet.save();
+}
+
+async function deleteTransferGroup(
+  base: ITransaction,
+  userId: Types.ObjectId
+): Promise<void> {
+  let legs: ITransaction[] = [base];
+
+  if (base.transfer_group_id) {
+    legs = await Transaction.find({
+      user_id: userId,
+      transfer_group_id: base.transfer_group_id,
+      type: 'transfer',
+    });
+  } else {
+    const baseDate = new Date(base.date);
+    const start = new Date(baseDate.getTime() - 2000);
+    const end = new Date(baseDate.getTime() + 2000);
+
+    const mirror = await Transaction.findOne({
+      user_id: userId,
+      type: 'transfer',
+      amount: base.amount,
+      date: { $gte: start, $lte: end },
+      wallet_id: base.destination_wallet_id,
+      destination_wallet_id: base.wallet_id,
+      _id: { $ne: base._id },
+    });
+
+    if (mirror) {
+      legs = [base, mirror];
+    }
+  }
+
+  for (const leg of legs) {
+    if (!leg.wallet_id) continue;
+
+    const wallet = await Wallet.findOne({
+      _id: leg.wallet_id,
+      user_id: userId,
+      is_deleted: { $ne: true },
+    });
+    if (!wallet) {
+      throw new Error('Portefeuille introuvable');
+    }
+
+    if (leg.is_transfer_mirror) {
+      wallet.current_balance -= leg.amount;
+    } else {
+      wallet.current_balance += leg.amount;
+    }
+
+    if (wallet.current_balance < 0) {
+      throw new Error(
+        'Impossible de supprimer : solde de la poche destination insuffisant'
+      );
+    }
+
+    await wallet.save();
+  }
+
+  await Transaction.deleteMany({
+    _id: { $in: legs.map((l) => l._id) },
+    user_id: userId,
+  });
 }
 
 router.get('/', protect, async (req: Request, res: Response) => {
@@ -668,6 +799,41 @@ router.put('/:id', protect, async (req: Request, res: Response) => {
     console.error('Erreur update transaction:', error);
     const message =
       error instanceof Error ? error.message : 'Erreur lors de la mise à jour';
+    return res.status(400).json({ success: false, message });
+  }
+});
+
+router.delete('/:id', protect, async (req: Request, res: Response) => {
+  try {
+    const transaction = await Transaction.findOne({
+      _id: req.params.id,
+      user_id: req.user!._id,
+    });
+
+    if (!transaction) {
+      return res.status(404).json({
+        success: false,
+        message: 'Transaction introuvable',
+      });
+    }
+
+    if (transaction.type === 'transfer') {
+      await deleteTransferGroup(transaction, req.user!._id);
+    } else {
+      await reverseSimpleTransaction(transaction, req.user!._id);
+      await Transaction.findByIdAndDelete(transaction._id);
+    }
+
+    return res.json({
+      success: true,
+      message: 'Transaction supprimée',
+    });
+  } catch (error) {
+    console.error('Erreur delete transaction:', error);
+    const message =
+      error instanceof Error
+        ? error.message
+        : 'Erreur lors de la suppression';
     return res.status(400).json({ success: false, message });
   }
 });
