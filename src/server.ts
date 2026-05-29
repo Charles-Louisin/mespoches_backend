@@ -85,9 +85,17 @@ function logStartupBanner(mongoOk: boolean): void {
   if (process.env.APP_URL) {
     console.log(`  Frontend URL  : ${process.env.APP_URL}`);
   }
-  console.log(
-    `  CinetPay      : ${process.env.CINETPAY_API_KEY ? '✅ configuré' : '⚠️  non configuré'}`
+  const cinetpayOk = Boolean(
+    (process.env.CINETPAY_ACCOUNT_KEY || process.env.CINETPAY_API_KEY)?.trim() &&
+      (process.env.CINETPAY_ACCOUNT_PASSWORD || process.env.CINETPAY_API_PASSWORD)?.trim()
   );
+  const cinetpayEnv = (process.env.CINETPAY_ENV || 'sandbox').toLowerCase();
+  console.log(
+    `  CinetPay      : ${cinetpayOk ? `✅ configuré (${cinetpayEnv})` : '⚠️  non configuré'}`
+  );
+  if (cinetpayOk && process.env.API_PUBLIC_URL) {
+    console.log(`  Webhook IPN   : ${process.env.API_PUBLIC_URL.replace(/\/$/, '')}/api/webhooks/cinetpay`);
+  }
 
   if (mongoOk) {
     const { host, name, port } = mongoose.connection;

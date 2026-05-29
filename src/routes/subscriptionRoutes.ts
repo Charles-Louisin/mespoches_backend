@@ -7,19 +7,32 @@ import User from '../models/User';
 import { isPremiumUser } from '../utils/subscription';
 import { toPublicUser } from '../utils/userPayload';
 import {
-  generateTransactionId,
+  generateMerchantTransactionId,
   initCinetPayPayment,
   isCinetPayConfigured,
+  type CinetPayPaymentMethod,
 } from '../utils/cinetpay';
 import { getApiPublicUrl, getFrontendUrl } from '../utils/appUrl';
 import { processCinetPayTransaction } from '../utils/premiumPayment';
 
 const router = Router();
 
-const paymentMessage = () =>
-  isCinetPayConfigured()
-    ? 'Paiement Mobile Money et carte disponible via CinetPay.'
-    : 'Configurez CINETPAY_API_KEY et CINETPAY_SITE_ID pour activer les paiements.';
+const PAYMENT_METHODS: Record<string, CinetPayPaymentMethod> = {
+  orange: 'OM_CM',
+  mtn: 'MTN_CM',
+  all: undefined,
+};
+
+const paymentMessage = () => {
+  const sandbox =
+    (process.env.CINETPAY_ENV || 'sandbox').toLowerCase() !== 'production';
+  if (!isCinetPayConfigured()) {
+    return 'Configurez CINETPAY_ACCOUNT_KEY et CINETPAY_ACCOUNT_PASSWORD pour activer les paiements.';
+  }
+  return sandbox
+    ? 'Sandbox CinetPay — Orange Money, MTN MoMo et carte (Cameroun, XAF).'
+    : 'Paiement Orange Money, MTN MoMo et carte via CinetPay (Cameroun).';
+};
 
 router.get('/plans', (_req: Request, res: Response) => {
   return res.json({
@@ -27,7 +40,13 @@ router.get('/plans', (_req: Request, res: Response) => {
     data: {
       plans: SUBSCRIPTION_PLANS,
       paymentAvailable: isCinetPayConfigured(),
+      sandbox: (process.env.CINETPAY_ENV || 'sandbox').toLowerCase() !== 'production',
       message: paymentMessage(),
+      paymentMethods: [
+        { id: 'all', label: 'Tous les moyens', code: null },
+        { id: 'orange', label: 'Orange Money', code: 'OM_CM' },
+        { id: 'mtn', label: 'MTN MoMo', code: 'MTN_CM' },
+      ],
     },
   });
 });
@@ -60,46 +79,55 @@ router.post('/checkout', protect, async (req: Request, res: Response) => {
       });
     }
 
+    const methodKey = String(req.body?.payment_method || 'all').toLowerCase();
+    const paymentMethod =
+      PAYMENT_METHODS[methodKey] ?? PAYMENT_METHODS.all;
+
     const plan = SUBSCRIPTION_PLANS[period];
     const user = req.user!;
-    const transactionId = generateTransactionId(user._id.toString());
+    const merchantTransactionId = generateMerchantTransactionId();
     const frontendUrl = getFrontendUrl();
     const apiUrl = getApiPublicUrl();
 
+    const successUrl = `${frontendUrl}/subscription/payment/success?transaction_id=${encodeURIComponent(merchantTransactionId)}`;
+    const failedUrl = `${frontendUrl}/subscription/payment?period=${period}&payment=failed`;
+
     await SubscriptionPayment.create({
       user_id: user._id,
-      transaction_id: transactionId,
+      transaction_id: merchantTransactionId,
       period,
       amount: plan.priceXaf,
       currency: 'XAF',
       status: 'pending',
     });
 
-    const { paymentUrl, paymentToken } = await initCinetPayPayment({
-      transactionId,
+    const init = await initCinetPayPayment({
+      merchantTransactionId,
       amount: plan.priceXaf,
       description: `MES POCHES Premium — ${plan.label}`,
       notifyUrl: `${apiUrl}/api/webhooks/cinetpay`,
-      returnUrl: `${frontendUrl}/subscription/payment/success?transaction_id=${encodeURIComponent(transactionId)}`,
+      successUrl,
+      failedUrl,
+      paymentMethod,
       customer: {
-        id: user._id.toString(),
         email: user.email,
         name: user.name,
       },
     });
 
-    if (paymentToken) {
-      await SubscriptionPayment.updateOne(
-        { transaction_id: transactionId },
-        { cinetpay_payment_token: paymentToken }
-      );
-    }
+    await SubscriptionPayment.updateOne(
+      { transaction_id: merchantTransactionId },
+      {
+        cinetpay_notify_token: init.notifyToken,
+        cinetpay_transaction_id: init.cinetpayTransactionId || null,
+      }
+    );
 
     return res.json({
       success: true,
       data: {
-        paymentUrl,
-        transactionId,
+        paymentUrl: init.paymentUrl,
+        transactionId: merchantTransactionId,
       },
     });
   } catch (error) {
@@ -146,10 +174,15 @@ router.get('/verify', protect, async (req: Request, res: Response) => {
     const freshUser = await User.findById(req.user!._id);
     const me = toPublicUser(freshUser || req.user!);
 
+    let status: string = result.payment.status;
+    if (result.ok) status = 'completed';
+    else if (result.pending) status = 'pending';
+    else if (result.payment.status === 'failed') status = 'failed';
+
     return res.json({
       success: true,
       data: {
-        status: result.ok ? 'completed' : result.payment.status,
+        status,
         isPremium: me.isPremium,
         premiumUntil: me.premiumUntil,
         user: me,

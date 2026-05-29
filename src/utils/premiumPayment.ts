@@ -3,7 +3,12 @@ import SubscriptionPayment, {
   type ISubscriptionPayment,
   type BillingPeriod,
 } from '../models/SubscriptionPayment';
-import { checkCinetPayPayment, isCinetPayConfigured } from './cinetpay';
+import {
+  getCinetPayPaymentStatus,
+  isCinetPayConfigured,
+  isCinetPayPaymentFailed,
+  isCinetPayPaymentSuccess,
+} from './cinetpay';
 
 export function computePremiumUntil(
   currentUntil: Date | null | undefined,
@@ -58,6 +63,7 @@ export async function processCinetPayTransaction(transactionId: string): Promise
   ok: boolean;
   payment?: ISubscriptionPayment;
   premiumUntil?: Date | null;
+  pending?: boolean;
 }> {
   if (!isCinetPayConfigured()) {
     return { ok: false };
@@ -73,11 +79,30 @@ export async function processCinetPayTransaction(transactionId: string): Promise
     return { ok: true, payment, premiumUntil: user?.premiumUntil ?? null };
   }
 
-  const check = await checkCinetPayPayment(transactionId);
-  if (!check.success) {
+  if (payment.status === 'failed') {
     return { ok: false, payment };
   }
 
-  const { premiumUntil } = await fulfillSubscriptionPayment(payment);
-  return { ok: true, payment, premiumUntil };
+  const status = await getCinetPayPaymentStatus(transactionId);
+
+  await SubscriptionPayment.findByIdAndUpdate(payment._id, {
+    cinetpay_status: status.status,
+    ...(status.transaction_id
+      ? { cinetpay_transaction_id: status.transaction_id }
+      : {}),
+  });
+
+  if (isCinetPayPaymentSuccess(status)) {
+    const { premiumUntil } = await fulfillSubscriptionPayment(payment);
+    return { ok: true, payment, premiumUntil };
+  }
+
+  if (isCinetPayPaymentFailed(status)) {
+    await SubscriptionPayment.findByIdAndUpdate(payment._id, {
+      status: 'failed',
+    });
+    return { ok: false, payment };
+  }
+
+  return { ok: false, payment, pending: true };
 }

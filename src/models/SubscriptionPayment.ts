@@ -10,6 +10,10 @@ export interface ISubscriptionPayment extends Document {
   amount: number;
   currency: string;
   status: SubscriptionPaymentStatus;
+  cinetpay_transaction_id?: string | null;
+  cinetpay_notify_token?: string | null;
+  cinetpay_status?: string | null;
+  /** @deprecated — ancien champ v2 */
   cinetpay_payment_token?: string | null;
   completed_at?: Date | null;
   created_at: Date;
@@ -41,6 +45,9 @@ const subscriptionPaymentSchema = new Schema<ISubscriptionPayment>(
       enum: ['pending', 'completed', 'failed'],
       default: 'pending',
     },
+    cinetpay_transaction_id: { type: String, default: null, index: true },
+    cinetpay_notify_token: { type: String, default: null },
+    cinetpay_status: { type: String, default: null },
     cinetpay_payment_token: { type: String, default: null },
     completed_at: { type: Date, default: null },
     created_at: { type: Date, default: Date.now },
