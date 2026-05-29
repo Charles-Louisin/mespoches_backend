@@ -10,6 +10,9 @@ import {
   generateMerchantTransactionId,
   initCinetPayPayment,
   isCinetPayConfigured,
+  isCinetPayProduction,
+  assertCinetPayProductionConfig,
+  getCinetPaySetupPayload,
   type CinetPayPaymentMethod,
 } from '../utils/cinetpay';
 import { getApiPublicUrl, getFrontendUrl } from '../utils/appUrl';
@@ -24,15 +27,19 @@ const PAYMENT_METHODS: Record<string, CinetPayPaymentMethod> = {
 };
 
 const paymentMessage = () => {
-  const sandbox =
-    (process.env.CINETPAY_ENV || 'sandbox').toLowerCase() !== 'production';
   if (!isCinetPayConfigured()) {
     return 'Configurez CINETPAY_ACCOUNT_KEY et CINETPAY_ACCOUNT_PASSWORD pour activer les paiements.';
   }
-  return sandbox
-    ? 'Sandbox CinetPay — Orange Money, MTN MoMo et carte (Cameroun, XAF).'
-    : 'Paiement Orange Money, MTN MoMo et carte via CinetPay (Cameroun).';
+  return isCinetPayProduction()
+    ? 'Paiement réel — Orange Money, MTN MoMo et carte (Cameroun, XAF).'
+    : 'Sandbox CinetPay — Orange Money, MTN MoMo et carte (Cameroun, XAF).';
 };
+
+/** IP et checklist CinetPay (à appeler sur le serveur qui exécute l’API) */
+router.get('/cinetpay-setup', async (_req: Request, res: Response) => {
+  const data = await getCinetPaySetupPayload();
+  return res.json({ success: true, data });
+});
 
 router.get('/plans', (_req: Request, res: Response) => {
   return res.json({
@@ -40,7 +47,7 @@ router.get('/plans', (_req: Request, res: Response) => {
     data: {
       plans: SUBSCRIPTION_PLANS,
       paymentAvailable: isCinetPayConfigured(),
-      sandbox: (process.env.CINETPAY_ENV || 'sandbox').toLowerCase() !== 'production',
+      sandbox: !isCinetPayProduction(),
       message: paymentMessage(),
       paymentMethods: [
         { id: 'all', label: 'Tous les moyens', code: null },
@@ -88,6 +95,11 @@ router.post('/checkout', protect, async (req: Request, res: Response) => {
     const merchantTransactionId = generateMerchantTransactionId();
     const frontendUrl = getFrontendUrl();
     const apiUrl = getApiPublicUrl();
+
+    assertCinetPayProductionConfig({
+      apiPublicUrl: apiUrl,
+      frontendUrl,
+    });
 
     const successUrl = `${frontendUrl}/subscription/payment/success?transaction_id=${encodeURIComponent(merchantTransactionId)}`;
     const failedUrl = `${frontendUrl}/subscription/payment?period=${period}&payment=failed`;

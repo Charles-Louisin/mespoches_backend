@@ -13,13 +13,110 @@ export type CinetPayPaymentMethod =
 
 let tokenCache: { accessToken: string; expiresAt: number } | null = null;
 
+/** sandbox | production — si CINETPAY_ENV absent, suit NODE_ENV */
+export function getCinetPayEnvironment(): 'sandbox' | 'production' {
+  const explicit = process.env.CINETPAY_ENV?.trim().toLowerCase();
+  if (explicit === 'production' || explicit === 'sandbox') {
+    return explicit;
+  }
+  return process.env.NODE_ENV === 'production' ? 'production' : 'sandbox';
+}
+
+export function isCinetPayProduction(): boolean {
+  return getCinetPayEnvironment() === 'production';
+}
+
 export function getCinetPayApiBaseUrl(): string {
-  const env = (process.env.CINETPAY_ENV || 'sandbox').toLowerCase();
-  return env === 'production' ? PRODUCTION_API_BASE : SANDBOX_API_BASE;
+  return isCinetPayProduction() ? PRODUCTION_API_BASE : SANDBOX_API_BASE;
 }
 
 export function isCinetPayConfigured(): boolean {
   return Boolean(getAccountCredentials());
+}
+
+function formatCinetPayApiError(json: {
+  code?: number;
+  status?: string;
+  description?: string;
+  message?: string;
+}): string {
+  const raw =
+    json.description ||
+    json.message ||
+    json.status ||
+    'Erreur CinetPay';
+
+  const lower = raw.toLowerCase();
+  if (
+    json.code === 2011 ||
+    json.status === 'NOT_ALLOWED' ||
+    lower.includes('whitelist') ||
+    lower.includes('liste blanche')
+  ) {
+    if (isCinetPayProduction()) {
+      return (
+        'IP non autorisée par CinetPay (production). Dans l’espace marchand → ' +
+        'Développeur → liste blanche IP, ajoutez l’IP sortante de votre serveur ' +
+        'd’hébergement (celle affichée par GET /api/cinetpay-setup ' +
+        'appelé sur l’API en ligne, pas depuis votre PC).'
+      );
+    }
+    return (
+      'IP non autorisée par CinetPay. Ajoutez l’IP dans l’espace marchand ' +
+      '(Développeur → liste blanche IP). GET /api/cinetpay-setup ' +
+      'sur le serveur qui appelle l’API.'
+    );
+  }
+
+  return raw;
+}
+
+/** IP publique sortante du serveur (pour la liste blanche CinetPay) */
+export async function detectOutboundPublicIp(): Promise<string | null> {
+  try {
+    const res = await fetch('https://api.ipify.org?format=json', {
+      signal: AbortSignal.timeout(5000),
+    });
+    const json = (await res.json()) as { ip?: string };
+    return json.ip?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function getCinetPaySetupPayload() {
+  const publicIp = await detectOutboundPublicIp();
+  const env = getCinetPayEnvironment();
+  const production = isCinetPayProduction();
+  const apiPublic = process.env.API_PUBLIC_URL?.trim().replace(/\/$/, '') || null;
+
+  const steps = production
+    ? [
+        'Compte marchand CinetPay Cameroun (XAF) — clés production.',
+        'CINETPAY_ENV=production sur le serveur.',
+        'APP_URL et API_PUBLIC_URL en https:// (sans localhost).',
+        'Espace marchand → Développeur → Liste blanche IP.',
+        `Ajoutez l’IP sortante : ${publicIp || '?'}`,
+      ]
+    : [
+        'Mode sandbox (api.cinetpay.net) — HTTPS autorisé sur Railway.',
+        'CINETPAY_ENV=sandbox (même si NODE_ENV=production sur l’hébergeur).',
+        'Clés API du compte / environnement SANDBOX CinetPay.',
+        'Espace marchand SANDBOX → Développeur → Liste blanche IP.',
+        `Ajoutez l’IP sortante Railway : ${publicIp || '?'}`,
+        `Webhook : ${apiPublic || 'API_PUBLIC_URL'}/api/webhooks/cinetpay`,
+        'Numéros de test : +237699990700 (Orange succès), suffixe 0703 = échec.',
+      ];
+
+  return {
+    configured: isCinetPayConfigured(),
+    environment: env,
+    apiBaseUrl: getCinetPayApiBaseUrl(),
+    outboundPublicIp: publicIp,
+    notifyUrl: apiPublic ? `${apiPublic}/api/webhooks/cinetpay` : null,
+    httpsOk: Boolean(apiPublic?.startsWith('https://')),
+    steps,
+  };
 }
 
 function getAccountCredentials(): { apiKey: string; apiPassword: string } | null {
@@ -65,11 +162,7 @@ async function getAccessToken(): Promise<string> {
   };
 
   if (!res.ok || json.code !== 200 || !json.access_token) {
-    throw new Error(
-      json.description ||
-        json.status ||
-        'Authentification CinetPay impossible'
-    );
+    throw new Error(formatCinetPayApiError(json));
   }
 
   const expiresInSec = Math.min(json.expires_in ?? 300, 300);
@@ -104,7 +197,26 @@ async function cinetPayFetch<T>(
     );
   }
 
-  return (await res.json()) as T;
+  const json = (await res.json()) as T & {
+    code?: number;
+    status?: string;
+    description?: string;
+    message?: string;
+  };
+
+  if (
+    typeof json === 'object' &&
+    json !== null &&
+    (json.code === 2011 ||
+      json.status === 'NOT_ALLOWED' ||
+      String(json.description || json.message || '')
+        .toLowerCase()
+        .includes('whitelist'))
+  ) {
+    throw new Error(formatCinetPayApiError(json));
+  }
+
+  return json as T;
 }
 
 export interface CinetPayInitParams {
@@ -127,6 +239,29 @@ export interface CinetPayInitResult {
   notifyToken: string;
   cinetpayTransactionId: string;
   merchantTransactionId: string;
+}
+
+/** Exigences CinetPay en production (HTTPS, URLs publiques) */
+export function assertCinetPayProductionConfig(
+  urls: { apiPublicUrl: string; frontendUrl: string }
+): void {
+  if (!isCinetPayProduction()) return;
+
+  for (const [label, value] of [
+    ['API_PUBLIC_URL', urls.apiPublicUrl],
+    ['APP_URL', urls.frontendUrl],
+  ] as const) {
+    if (!value.startsWith('https://')) {
+      throw new Error(
+        `En production, ${label} doit commencer par https:// (requis par CinetPay). Valeur actuelle : ${value}`
+      );
+    }
+    if (value.includes('localhost') || value.includes('127.0.0.1')) {
+      throw new Error(
+        `En production, ${label} ne peut pas pointer vers localhost.`
+      );
+    }
+  }
 }
 
 export async function initCinetPayPayment(
@@ -175,11 +310,7 @@ export async function initCinetPayPayment(
   });
 
   if (json.code !== 200 || !json.payment_url || !json.notify_token) {
-    throw new Error(
-      json.description ||
-        json.status ||
-        'Impossible d\'initialiser le paiement CinetPay'
-    );
+    throw new Error(formatCinetPayApiError(json));
   }
 
   return {

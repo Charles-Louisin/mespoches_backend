@@ -17,6 +17,11 @@ import subscriptionRoutes from './routes/subscriptionRoutes';
 import webhookRoutes from './routes/webhookRoutes';
 import plannedExpenseRoutes from './routes/plannedExpenseRoutes';
 import { startPlannedExpenseScheduler } from './jobs/plannedExpenseScheduler';
+import {
+  getCinetPayEnvironment,
+  getCinetPaySetupPayload,
+  isCinetPayConfigured,
+} from './utils/cinetpay';
 
 const app = express();
 
@@ -44,17 +49,31 @@ if (!MONGODB_URI) {
   process.exit(1);
 }
 
-app.get('/api/health', (_req, res) => {
+app.get('/api/health', async (req, res) => {
   const mongoState = mongoose.connection.readyState;
   const mongoStatus =
     mongoState === 1 ? 'connected' : mongoState === 2 ? 'connecting' : 'disconnected';
 
-  res.json({
+  const payload: Record<string, unknown> = {
     success: true,
     message: 'API MES POCHES opérationnelle',
     env: NODE_ENV,
     mongodb: mongoStatus,
-  });
+    cinetpayEnv: getCinetPayEnvironment(),
+    cinetpayConfigured: isCinetPayConfigured(),
+  };
+
+  if (req.query.cinetpay === '1' || req.query.cinetpay === 'true') {
+    payload.cinetpay = await getCinetPaySetupPayload();
+  }
+
+  res.json(payload);
+});
+
+/** Alias racine — IP à whitelister (sandbox ou prod) */
+app.get('/api/cinetpay-setup', async (_req, res) => {
+  const data = await getCinetPaySetupPayload();
+  res.json({ success: true, data });
 });
 
 app.use('/api/auth', authRoutes);
@@ -89,12 +108,18 @@ function logStartupBanner(mongoOk: boolean): void {
     (process.env.CINETPAY_ACCOUNT_KEY || process.env.CINETPAY_API_KEY)?.trim() &&
       (process.env.CINETPAY_ACCOUNT_PASSWORD || process.env.CINETPAY_API_PASSWORD)?.trim()
   );
-  const cinetpayEnv = (process.env.CINETPAY_ENV || 'sandbox').toLowerCase();
+  const cinetpayEnv =
+    process.env.CINETPAY_ENV?.trim().toLowerCase() ||
+    (isProduction ? 'production (auto)' : 'sandbox (auto)');
   console.log(
     `  CinetPay      : ${cinetpayOk ? `✅ configuré (${cinetpayEnv})` : '⚠️  non configuré'}`
   );
+  if (cinetpayOk) {
+    console.log(`  CinetPay API  : ${getCinetPayEnvironment() === 'production' ? 'api.cinetpay.co' : 'api.cinetpay.net (sandbox)'}`);
+  }
   if (cinetpayOk && process.env.API_PUBLIC_URL) {
     console.log(`  Webhook IPN   : ${process.env.API_PUBLIC_URL.replace(/\/$/, '')}/api/webhooks/cinetpay`);
+    console.log(`  IP whitelist  : GET …/api/cinetpay-setup après déploiement`);
   }
 
   if (mongoOk) {
