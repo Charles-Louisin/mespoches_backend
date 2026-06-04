@@ -16,6 +16,7 @@ import exportRoutes from './routes/exportRoutes';
 import subscriptionRoutes from './routes/subscriptionRoutes';
 import webhookRoutes from './routes/webhookRoutes';
 import plannedExpenseRoutes from './routes/plannedExpenseRoutes';
+import pendingTransactionRoutes from './routes/pendingTransactionRoutes';
 import { startPlannedExpenseScheduler } from './jobs/plannedExpenseScheduler';
 import {
   getCinetPayEnvironment,
@@ -89,6 +90,7 @@ app.use('/api/export', exportRoutes);
 app.use('/api/subscription', subscriptionRoutes);
 app.use('/api/webhooks', webhookRoutes);
 app.use('/api/planned-expenses', plannedExpenseRoutes);
+app.use('/api/pending-transactions', pendingTransactionRoutes);
 
 function logStartupBanner(mongoOk: boolean): void {
   const line = '─'.repeat(42);
