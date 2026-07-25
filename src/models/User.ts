@@ -8,14 +8,18 @@ export interface ILoginHistoryEntry {
 }
 
 export type UserPlan = 'free' | 'premium';
+export type AuthProvider = 'email' | 'google';
 
 export interface IUser extends Document {
   email: string;
-  password: string;
+  password?: string;
+  googleId?: string | null;
+  authProvider: AuthProvider;
   emailVerified: boolean;
   verificationCode?: string | null;
   verificationCodeExpires?: Date | null;
   lastVerificationSentAt?: Date | null;
+  verificationAttempts?: number;
   role: 'user' | 'admin';
   plan: UserPlan;
   premiumUntil: Date | null;
@@ -40,9 +44,25 @@ const userSchema = new Schema<IUser>(
     },
     password: {
       type: String,
-      required: [true, 'Le mot de passe est requis'],
-      minlength: [6, 'Le mot de passe doit contenir au moins 6 caractères'],
+      required: [
+        function (this: IUser) {
+          return this.authProvider !== 'google' && !this.googleId;
+        },
+        'Le mot de passe est requis',
+      ],
+      minlength: [10, 'Le mot de passe doit contenir au moins 10 caractères'],
       select: false,
+    },
+    googleId: {
+      type: String,
+      default: null,
+      sparse: true,
+      unique: true,
+    },
+    authProvider: {
+      type: String,
+      enum: ['email', 'google'],
+      default: 'email',
     },
     emailVerified: {
       type: Boolean,
@@ -60,6 +80,11 @@ const userSchema = new Schema<IUser>(
     lastVerificationSentAt: {
       type: Date,
       default: null,
+    },
+    verificationAttempts: {
+      type: Number,
+      default: 0,
+      min: 0,
     },
     role: {
       type: String,
@@ -108,7 +133,7 @@ const userSchema = new Schema<IUser>(
 );
 
 userSchema.pre('save', async function (next) {
-  if (!this.isModified('password')) return next();
+  if (!this.isModified('password') || !this.password) return next();
 
   try {
     const salt = await bcrypt.genSalt(10);
@@ -122,6 +147,7 @@ userSchema.pre('save', async function (next) {
 userSchema.methods.comparePassword = async function (
   candidatePassword: string
 ): Promise<boolean> {
+  if (!this.password) return false;
   return bcrypt.compare(candidatePassword, this.password);
 };
 

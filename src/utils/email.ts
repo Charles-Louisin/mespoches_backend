@@ -1,4 +1,5 @@
 import { Resend } from 'resend';
+import { escapeHtml, generateSecureOtp } from './security';
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
@@ -9,7 +10,7 @@ const FROM_EMAIL =
 const REPLY_TO = process.env.RESEND_REPLY_TO || undefined;
 
 export function generateVerificationCode(): string {
-  return Math.floor(100000 + Math.random() * 900000).toString();
+  return generateSecureOtp();
 }
 
 export async function sendVerificationEmail(
@@ -30,7 +31,7 @@ export async function sendVerificationEmail(
         <h1 style="color: #0ea5e9; font-size: 24px;">MES POCHES</h1>
         <p>Bienvenue ! Utilisez le code ci-dessous pour vérifier votre adresse email :</p>
         <div style="background: #f0f9ff; border-radius: 12px; padding: 24px; text-align: center; margin: 24px 0;">
-          <span style="font-size: 36px; font-weight: bold; letter-spacing: 8px; color: #0369a1;">${code}</span>
+          <span style="font-size: 36px; font-weight: bold; letter-spacing: 8px; color: #0369a1;">${escapeHtml(code)}</span>
         </div>
         <p style="color: #6b7280; font-size: 14px;">Ce code expire dans 15 minutes. Si vous n'avez pas demandé ce code, ignorez cet email.</p>
       </div>
@@ -83,7 +84,7 @@ export async function sendPlannedExpensesReminderEmail(
           item.category_id.name) ||
         item.description ||
         'Dépense';
-      return `<li style="margin: 8px 0;"><strong>${label}</strong> — ${item.amount.toLocaleString('fr-FR')} (${walletName})</li>`;
+      return `<li style="margin: 8px 0;"><strong>${escapeHtml(label)}</strong> — ${escapeHtml(item.amount.toLocaleString('fr-FR'))} (${escapeHtml(walletName)})</li>`;
     })
     .join('');
 
@@ -95,8 +96,8 @@ export async function sendPlannedExpensesReminderEmail(
     html: `
       <div style="font-family: sans-serif; max-width: 520px; margin: 0 auto; padding: 24px;">
         <h1 style="color: #0ea5e9; font-size: 22px;">MES POCHES</h1>
-        <p>Bonjour ${userName},</p>
-        <p>Demain (<strong>${tomorrowLabel}</strong>, UTC), les dépenses suivantes seront débitées automatiquement si votre solde le permet :</p>
+        <p>Bonjour ${escapeHtml(userName)},</p>
+        <p>Demain (<strong>${escapeHtml(tomorrowLabel)}</strong>, UTC), les dépenses suivantes seront débitées automatiquement si votre solde le permet :</p>
         <ul style="padding-left: 20px;">${rows}</ul>
         <p style="color: #6b7280; font-size: 14px;">Si le solde est insuffisant le jour J, la dépense sera annulée automatiquement. Vous pouvez encore annuler une dépense prévue depuis l'app tant que le jour J n'est pas arrivé.</p>
       </div>

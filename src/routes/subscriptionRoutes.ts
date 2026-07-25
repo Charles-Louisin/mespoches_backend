@@ -17,6 +17,7 @@ import {
 } from '../utils/cinetpay';
 import { getApiPublicUrl, getFrontendUrl } from '../utils/appUrl';
 import { processCinetPayTransaction } from '../utils/premiumPayment';
+import { assertSetupAccess } from '../utils/setupAccess';
 
 const router = Router();
 
@@ -36,7 +37,8 @@ const paymentMessage = () => {
 };
 
 /** IP et checklist CinetPay (à appeler sur le serveur qui exécute l’API) */
-router.get('/cinetpay-setup', async (_req: Request, res: Response) => {
+router.get('/cinetpay-setup', async (req: Request, res: Response) => {
+  if (!assertSetupAccess(req, res)) return;
   const data = await getCinetPaySetupPayload();
   return res.json({ success: true, data });
 });
@@ -167,19 +169,29 @@ router.get('/verify', protect, async (req: Request, res: Response) => {
       });
     }
 
-    const result = await processCinetPayTransaction(transactionId);
-
-    if (!result.payment) {
+    const payment = await SubscriptionPayment.findOne({
+      transaction_id: transactionId,
+    });
+    if (!payment) {
       return res.status(404).json({
         success: false,
         message: 'Paiement introuvable',
       });
     }
 
-    if (result.payment.user_id.toString() !== req.user!._id.toString()) {
+    if (payment.user_id.toString() !== req.user!._id.toString()) {
       return res.status(403).json({
         success: false,
         message: 'Ce paiement ne vous appartient pas',
+      });
+    }
+
+    const result = await processCinetPayTransaction(transactionId);
+
+    if (!result.payment) {
+      return res.status(404).json({
+        success: false,
+        message: 'Paiement introuvable',
       });
     }
 

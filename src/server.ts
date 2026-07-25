@@ -1,6 +1,7 @@
-import 'dotenv/config';
+import './loadEnv';
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import morgan from 'morgan';
 import mongoose from 'mongoose';
 import authRoutes from './routes/authRoutes';
@@ -23,22 +24,9 @@ import {
   getCinetPaySetupPayload,
   isCinetPayConfigured,
 } from './utils/cinetpay';
+import { assertSetupAccess } from './utils/setupAccess';
 
 const app = express();
-
-const corsOrigins = process.env.CORS_ORIGIN
-  ? process.env.CORS_ORIGIN.split(',').map((o) => o.trim())
-  : true;
-
-app.use(
-  cors({
-    origin: corsOrigins,
-    credentials: true,
-  })
-);
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(morgan('dev'));
 
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const isProduction = NODE_ENV === 'production';
@@ -50,6 +38,58 @@ if (!MONGODB_URI) {
   process.exit(1);
 }
 
+if (!process.env.JWT_SECRET?.trim()) {
+  console.error("❌ JWT_SECRET manquant dans les variables d'environnement");
+  process.exit(1);
+}
+
+// Requis derrière Render / ngrok / reverse-proxy pour IP réelle + rate-limit
+app.set('trust proxy', 1);
+
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+  })
+);
+
+const configuredOrigins = (process.env.CORS_ORIGIN || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+if (isProduction && configuredOrigins.length === 0) {
+  console.error(
+    '❌ CORS_ORIGIN obligatoire en production (liste d’origines séparées par des virgules)'
+  );
+  process.exit(1);
+}
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Requêtes same-origin / outils serveur (pas d’Origin)
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+      if (!isProduction && configuredOrigins.length === 0) {
+        callback(null, true);
+        return;
+      }
+      if (configuredOrigins.includes(origin)) {
+        callback(null, true);
+        return;
+      }
+      callback(null, false);
+    },
+    credentials: true,
+  })
+);
+app.use(express.json({ limit: '8mb' }));
+app.use(express.urlencoded({ extended: true, limit: '8mb' }));
+app.use(morgan(isProduction ? 'combined' : 'dev'));
+
 app.get('/api/health', async (req, res) => {
   const mongoState = mongoose.connection.readyState;
   const mongoStatus =
@@ -60,19 +100,22 @@ app.get('/api/health', async (req, res) => {
     message: 'API MES POCHES opérationnelle',
     env: NODE_ENV,
     mongodb: mongoStatus,
-    cinetpayEnv: getCinetPayEnvironment(),
-    cinetpayConfigured: isCinetPayConfigured(),
   };
 
+  // Détails CinetPay uniquement avec secret ops
   if (req.query.cinetpay === '1' || req.query.cinetpay === 'true') {
+    if (!assertSetupAccess(req, res)) return;
+    payload.cinetpayEnv = getCinetPayEnvironment();
+    payload.cinetpayConfigured = isCinetPayConfigured();
     payload.cinetpay = await getCinetPaySetupPayload();
   }
 
   res.json(payload);
 });
 
-/** Alias racine — IP à whitelister (sandbox ou prod) */
-app.get('/api/cinetpay-setup', async (_req, res) => {
+/** Alias racine — IP à whitelister (sandbox ou prod) — protégé */
+app.get('/api/cinetpay-setup', async (req, res) => {
+  if (!assertSetupAccess(req, res)) return;
   const data = await getCinetPaySetupPayload();
   res.json({ success: true, data });
 });
@@ -100,12 +143,18 @@ function logStartupBanner(mongoOk: boolean): void {
   console.log(line);
   console.log(`  Mode          : ${NODE_ENV}${isProduction ? '' : ' (développement)'}`);
   console.log(`  Port          : ${PORT}`);
-  if (process.env.CORS_ORIGIN) {
-    console.log(`  CORS          : ${process.env.CORS_ORIGIN}`);
+  if (configuredOrigins.length > 0) {
+    console.log(`  CORS          : ${configuredOrigins.join(', ')}`);
+  } else {
+    console.log(`  CORS          : permissif (dev uniquement)`);
   }
   if (process.env.APP_URL) {
     console.log(`  Frontend URL  : ${process.env.APP_URL}`);
   }
+  const googleOk = Boolean(process.env.GOOGLE_CLIENT_ID?.trim());
+  console.log(
+    `  Google OAuth  : ${googleOk ? '✅ configuré' : '⚠️  GOOGLE_CLIENT_ID manquant'}`
+  );
   const cinetpayOk = Boolean(
     (process.env.CINETPAY_ACCOUNT_KEY || process.env.CINETPAY_API_KEY)?.trim() &&
       (process.env.CINETPAY_ACCOUNT_PASSWORD || process.env.CINETPAY_API_PASSWORD)?.trim()
@@ -121,7 +170,7 @@ function logStartupBanner(mongoOk: boolean): void {
   }
   if (cinetpayOk && process.env.API_PUBLIC_URL) {
     console.log(`  Webhook IPN   : ${process.env.API_PUBLIC_URL.replace(/\/$/, '')}/api/webhooks/cinetpay`);
-    console.log(`  IP whitelist  : GET …/api/cinetpay-setup après déploiement`);
+    console.log(`  IP whitelist  : GET …/api/cinetpay-setup (avec CINETPAY_SETUP_SECRET)`);
   }
 
   if (mongoOk) {

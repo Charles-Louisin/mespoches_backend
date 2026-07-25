@@ -113,7 +113,7 @@ export async function applyHabitsAndAi(
         confidence = Math.max(confidence, ai.confidence ?? 0.85);
       }
     } catch (err) {
-      console.warn('[SmsLearning] Gemini enrichment skipped:', err);
+      console.warn('[SmsLearning] AI enrichment skipped:', err);
     }
   }
 

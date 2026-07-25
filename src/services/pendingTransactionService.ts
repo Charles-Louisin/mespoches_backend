@@ -4,135 +4,133 @@ import Transaction from '../models/Transaction';
 import Wallet from '../models/Wallet';
 import {
   parseMobileMoneySms,
-  parseNotificationText,
   ParsedMobileMoney,
 } from '../utils/mobileMoneySmsParser';
-import { parseReceiptImage, AiReceiptItem } from '../utils/gemini';
 import {
   applyHabitsAndAi,
   getUserSmsIdentity,
   learnFromValidation,
 } from './smsHabitService';
-
-async function getDefaultWalletId(userId: Types.ObjectId): Promise<Types.ObjectId | null> {
-  const w = await Wallet.findOne({ user_id: userId, is_deleted: { $ne: true } }).sort({
-    created_at: 1,
-  });
-  return w?._id ?? null;
-}
-
-async function findDuplicate(
-  userId: Types.ObjectId,
-  text: string,
-  transactionId: string
-): Promise<IPendingTransaction | null> {
-  if (transactionId) {
-    const byTx = await PendingTransaction.findOne({
-      user_id: userId,
-      status: 'pending',
-      transaction_id: transactionId,
-    });
-    if (byTx) return byTx;
-  }
-  return PendingTransaction.findOne({
-    user_id: userId,
-    status: 'pending',
-    raw_text: text.trim(),
-  });
-}
+import {
+  imageAnalysisService,
+  notificationAnalysisService,
+  transactionDraftService,
+} from './ai';
 
 async function buildFromParsed(
   userId: Types.ObjectId,
   parsed: ParsedMobileMoney,
   rawText: string,
-  source: 'sms' | 'notification'
+  source: 'sms' | 'notification',
+  options?: {
+    fromAi?: boolean;
+    warning?: string;
+  }
 ): Promise<IPendingTransaction> {
   const enriched = await applyHabitsAndAi(userId, parsed, rawText);
   const wallet_id =
-    enriched.wallet_id ?? (await getDefaultWalletId(userId));
+    enriched.wallet_id ?? (await transactionDraftService.getDefaultWalletId(userId));
 
-  return PendingTransaction.create({
-    user_id: userId,
-    status: 'pending',
+  return transactionDraftService.createFromParsedNotification({
+    userId,
+    parsed,
+    rawText,
     source,
-    type: enriched.type,
-    amount: parsed.amount,
-    operator: parsed.operator,
-    counterparty: parsed.counterparty,
-    description: enriched.description,
-    date: parsed.date,
-    raw_text: rawText.trim(),
+    fromAi: options?.fromAi,
     wallet_id,
     category_id: enriched.category_id,
+    description: enriched.description,
+    type: enriched.type,
     confidence: enriched.confidence,
-    pattern: parsed.pattern,
-    transaction_id: parsed.transaction_id,
-    ai_enriched: enriched.ai_enriched,
+    ai_enriched: enriched.ai_enriched || !!options?.fromAi,
+    warning: options?.warning,
   });
 }
+
+export type CreatePendingResult = {
+  item: IPendingTransaction;
+  duplicate: boolean;
+};
 
 export async function createFromSms(
   userId: Types.ObjectId,
   text: string,
   source: 'sms' | 'notification' = 'sms'
-): Promise<IPendingTransaction | null> {
+): Promise<CreatePendingResult | null> {
   const identity = await getUserSmsIdentity(userId);
-  const parsed = parseMobileMoneySms(text, identity);
-  if (!parsed) return null;
+  const outcome = await notificationAnalysisService.analyze(text, identity, {
+    allowAi: true,
+  });
 
-  const existing = await findDuplicate(userId, text, parsed.transaction_id);
-  if (existing) return existing;
+  if (!outcome.parsed) return null;
 
-  return buildFromParsed(userId, parsed, text, source);
+  const existing = await transactionDraftService.findDuplicate(
+    userId,
+    text,
+    outcome.parsed
+  );
+  if (existing) return { item: existing, duplicate: true };
+
+  const item = await buildFromParsed(userId, outcome.parsed, text, source, {
+    fromAi: outcome.sourceLevel === 'ai',
+    warning: outcome.warning,
+  });
+  return { item, duplicate: false };
 }
 
 export async function createFromNotification(
   userId: Types.ObjectId,
   title: string,
-  body: string
-): Promise<IPendingTransaction | null> {
+  body: string,
+  packageName?: string
+): Promise<CreatePendingResult | null> {
   const identity = await getUserSmsIdentity(userId);
-  const parsed = parseNotificationText(title, body, identity);
-  if (!parsed) return null;
-
   const raw = `${title}\n${body}`.trim();
-  const existing = await findDuplicate(userId, raw, parsed.transaction_id);
-  if (existing) return existing;
+  const outcome = await notificationAnalysisService.analyze(raw, identity, {
+    packageName,
+    allowAi: true,
+  });
 
-  return buildFromParsed(userId, parsed, raw, 'notification');
+  if (!outcome.parsed) return null;
+
+  const existing = await transactionDraftService.findDuplicate(
+    userId,
+    raw,
+    outcome.parsed
+  );
+  if (existing) return { item: existing, duplicate: true };
+
+  const item = await buildFromParsed(userId, outcome.parsed, raw, 'notification', {
+    fromAi: outcome.sourceLevel === 'ai',
+    warning: outcome.warning,
+  });
+  return { item, duplicate: false };
 }
+
+export type AiScanCreateResult = {
+  items: IPendingTransaction[];
+  warning?: string;
+  confidence: number;
+  document_type: string;
+};
 
 export async function createFromAiScan(
   userId: Types.ObjectId,
   base64: string,
   mimeType: string
-): Promise<IPendingTransaction[]> {
-  const result = await parseReceiptImage(base64, mimeType);
-  const wallet_id = await getDefaultWalletId(userId);
-  const created: IPendingTransaction[] = [];
+): Promise<AiScanCreateResult> {
+  const analysis = await imageAnalysisService.analyze(base64, mimeType);
+  const items = await transactionDraftService.createFromImageAnalysis({
+    userId,
+    analysis,
+  });
 
-  for (const item of result.items) {
-    const doc = await PendingTransaction.create({
-      user_id: userId,
-      status: 'pending',
-      source: 'ai_scan',
-      type: item.type,
-      amount: item.amount,
-      operator: 'unknown',
-      counterparty: '',
-      description: item.description,
-      date: item.date ? new Date(item.date) : new Date(),
-      raw_text: result.rawSummary,
-      wallet_id,
-      confidence: 0.75,
-      pattern: 'unknown',
-      ai_enriched: true,
-      ai_items: result.items as AiReceiptItem[],
-    });
-    created.push(doc);
-  }
-
-  return created;
+  return {
+    items,
+    warning: analysis.warning,
+    confidence: analysis.confidence,
+    document_type: analysis.document_type,
+  };
 }
 
 export async function validatePendingTransaction(

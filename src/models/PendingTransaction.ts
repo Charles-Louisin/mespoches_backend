@@ -1,7 +1,10 @@
 import mongoose, { Schema, Document, Model, Types } from 'mongoose';
 
+/** `pending` = pending_validation (jamais validé auto). */
 export type PendingTransactionStatus = 'pending' | 'validated' | 'rejected';
 export type PendingTransactionSource = 'sms' | 'notification' | 'ai_scan' | 'manual';
+/** Origine fine : image IA, notification parsée, ou extraction IA niveau 3. */
+export type PendingSourceType = 'image' | 'parser' | 'ai' | 'sms' | 'manual';
 export type MobileOperator = 'orange' | 'mtn' | 'unknown';
 export type SmsPatternKind =
   | 'transfer_out'
@@ -14,6 +17,8 @@ export interface IPendingTransaction extends Document {
   user_id: Types.ObjectId;
   status: PendingTransactionStatus;
   source: PendingTransactionSource;
+  source_type?: PendingSourceType;
+  document_type?: string;
   type: 'income' | 'expense';
   amount: number;
   operator: MobileOperator;
@@ -27,6 +32,7 @@ export interface IPendingTransaction extends Document {
   pattern: SmsPatternKind;
   transaction_id: string;
   ai_enriched: boolean;
+  low_confidence_warning?: string;
   ai_items: Array<{
     description: string;
     amount: number;
@@ -55,11 +61,18 @@ const pendingTransactionSchema = new Schema<IPendingTransaction>(
       enum: ['sms', 'notification', 'ai_scan', 'manual'],
       required: true,
     },
+    source_type: {
+      type: String,
+      enum: ['image', 'parser', 'ai', 'sms', 'manual'],
+      default: undefined,
+    },
+    document_type: { type: String, default: undefined },
     type: {
       type: String,
       enum: ['income', 'expense'],
       default: 'expense',
     },
+    low_confidence_warning: { type: String, default: undefined },
     amount: {
       type: Number,
       required: true,

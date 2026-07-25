@@ -11,6 +11,8 @@ import {
 } from '../services/pendingTransactionService';
 import { getSmsHabitsSummary } from '../services/smsHabitService';
 import { analyzeSmsRecurrences } from '../utils/geminiSmsLearning';
+import { formatAiError } from '../services/ai';
+import { aiScanLimiter } from '../utils/security';
 
 const router = Router();
 
@@ -207,12 +209,17 @@ router.post('/parse-sms', async (req: Request, res: Response) => {
     if (!created) {
       res.status(422).json({
         success: false,
-        message: 'SMS non reconnu (Orange Money / MTN MoMo attendu)',
+        message: 'SMS non reconnu comme transaction financière',
       });
       return;
     }
 
-    res.status(201).json({ success: true, data: created });
+    if (created.duplicate) {
+      res.status(200).json({ success: true, data: created.item, duplicate: true });
+      return;
+    }
+
+    res.status(201).json({ success: true, data: created.item, duplicate: false });
   } catch (e) {
     res.status(500).json({
       success: false,
@@ -221,7 +228,47 @@ router.post('/parse-sms', async (req: Request, res: Response) => {
   }
 });
 
-router.post('/ai-scan', premiumOnly, async (req: Request, res: Response) => {
+router.post('/parse-notification', async (req: Request, res: Response) => {
+  try {
+    const title = String(req.body.title || '').trim();
+    const body = String(req.body.body || '').trim();
+    const packageName = req.body.packageName
+      ? String(req.body.packageName).trim()
+      : undefined;
+    if (!title && !body) {
+      res.status(400).json({ success: false, message: 'Titre ou corps requis' });
+      return;
+    }
+
+    const created = await createFromNotification(
+      req.user!._id,
+      title,
+      body,
+      packageName
+    );
+    if (!created) {
+      res.status(422).json({
+        success: false,
+        message: 'Notification non reconnue comme transaction financière',
+      });
+      return;
+    }
+
+    if (created.duplicate) {
+      res.status(200).json({ success: true, data: created.item, duplicate: true });
+      return;
+    }
+
+    res.status(201).json({ success: true, data: created.item, duplicate: false });
+  } catch (e) {
+    res.status(500).json({
+      success: false,
+      message: e instanceof Error ? e.message : 'Erreur serveur',
+    });
+  }
+});
+
+router.post('/ai-scan', premiumOnly, aiScanLimiter, async (req: Request, res: Response) => {
   try {
     const image = String(req.body.image || '');
     const mimeType = String(req.body.mimeType || 'image/jpeg');
@@ -230,16 +277,19 @@ router.post('/ai-scan', premiumOnly, async (req: Request, res: Response) => {
       return;
     }
 
-    const created = await createFromAiScan(req.user!._id, image, mimeType);
+    const result = await createFromAiScan(req.user!._id, image, mimeType);
     res.status(201).json({
       success: true,
-      data: created,
-      message: `${created.length} transaction(s) proposée(s)`,
+      data: result.items,
+      warning: result.warning,
+      confidence: result.confidence,
+      document_type: result.document_type,
+      message: `${result.items.length} transaction(s) proposée(s)`,
     });
   } catch (e) {
     res.status(400).json({
       success: false,
-      message: e instanceof Error ? e.message : 'Analyse IA impossible',
+      message: formatAiError(e),
     });
   }
 });

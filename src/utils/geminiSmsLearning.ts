@@ -1,4 +1,4 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { aiService } from '../services/ai';
 import type { ParsedMobileMoney } from './mobileMoneySmsParser';
 
 export type AiSmsEnrichment = {
@@ -21,21 +21,12 @@ type HabitLean = {
   category_id?: { name?: string } | null;
 };
 
-function getClient(): GoogleGenerativeAI {
-  const key = process.env.GEMINI_API_KEY?.trim();
-  if (!key) throw new Error('GEMINI_API_KEY non configurée');
-  return new GoogleGenerativeAI(key);
-}
-
 /** Enrichit une proposition SMS avec l'historique des validations (Premium). */
 export async function enrichPendingWithGemini(
   rawSms: string,
   parsed: ParsedMobileMoney,
   habits: HabitLean[]
 ): Promise<AiSmsEnrichment | null> {
-  const genAI = getClient();
-  const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-
   const habitLines = habits
     .slice(0, 25)
     .map(
@@ -44,58 +35,46 @@ export async function enrichPendingWithGemini(
     )
     .join('\n');
 
-  const prompt = `Tu es l'assistant MES POCHES (Cameroun, XAF). Un SMS Mobile Money vient d'être parsé. L'utilisateur Premium a un historique de validations.
+  const parsedSummary = [
+    `- type: ${parsed.type}`,
+    `- montant: ${parsed.amount} FCFA`,
+    `- contrepartie: ${parsed.counterparty}`,
+    `- pattern: ${parsed.pattern}`,
+    `- expéditeur: ${parsed.sender_name} (${parsed.sender_phone})`,
+    `- destinataire: ${parsed.recipient_name} (${parsed.recipient_phone})`,
+  ].join('\n');
 
-SMS brut:
-"""
-${rawSms}
-"""
-
-Parse actuel:
-- type: ${parsed.type}
-- montant: ${parsed.amount} FCFA
-- contrepartie: ${parsed.counterparty}
-- pattern: ${parsed.pattern}
-- expéditeur: ${parsed.sender_name} (${parsed.sender_phone})
-- destinataire: ${parsed.recipient_name} (${parsed.recipient_phone})
-
-Habitudes apprises (validations passées):
-${habitLines || '(aucune)'}
-
-Corrige/améliore la proposition pour correspondre aux habitudes (même commerçant, transferts récurrents, libellés préférés).
-Réponds UNIQUEMENT en JSON:
-{
-  "type": "income" | "expense",
-  "description": "libellé court en français",
-  "category_hint": "nom catégorie probable ou null",
-  "counterparty": "nom contrepartie affiné",
-  "is_recurring": true/false,
-  "recurrence_hint": "ex: loyer mensuel, courses hebdo",
-  "confidence": 0.0 à 1.0
-}`;
-
-  const result = await model.generateContent(prompt);
-  const text = result.response.text().trim();
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) return null;
-
-  const data = JSON.parse(jsonMatch[0]) as AiSmsEnrichment;
-  return data;
+  try {
+    const data = await aiService.enrichSms(rawSms, parsedSummary, habitLines);
+    if (!data) return null;
+    return data as AiSmsEnrichment;
+  } catch {
+    return null;
+  }
 }
 
 /** Analyse les récurrences dans l'historique SMS validé (Premium, optionnel). */
 export async function analyzeSmsRecurrences(habits: HabitLean[]): Promise<string> {
   if (habits.length < 3) return '';
 
-  const genAI = getClient();
-  const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-
   const summary = habits
     .map((h) => `${h.counterparty}: ${h.type}, ${h.validation_count} validations, ${h.description}`)
     .join('\n');
 
-  const result = await model.generateContent(
-    `Analyse ces habitudes Mobile Money et liste les récurrences probables (français, 3-5 puces courtes):\n${summary}`
-  );
-  return result.response.text().trim();
+  try {
+    const { json } = await aiService.completeJson({
+      purpose: 'sms_recurrence',
+      modality: 'text',
+      messages: [
+        {
+          role: 'user',
+          content: `Analyse ces habitudes Mobile Money. Réponds UNIQUEMENT en JSON: {"analysis":"3-5 puces courtes en français"}\n${summary}`,
+        },
+      ],
+    });
+    const analysis = (json as { analysis?: string }).analysis;
+    return analysis || '';
+  } catch {
+    return '';
+  }
 }
