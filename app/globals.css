@@ -1,0 +1,15 @@
+@import 'tailwindcss';
+
+:root { --ink: #17211f; --muted: #71807c; --paper: #f5f7f4; --surface: #ffffff; --jade: #087f68; --mint: #dff3ea; --coral: #e87560; --line: #e5ebe7; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--paper); color: var(--ink); font-family: Arial, sans-serif; }
+button, input, select { font: inherit; }
+button { cursor: pointer; }
+::selection { background: var(--mint); color: var(--ink); }
+.font-display { font-family: Georgia, serif; }
+
+@layer utilities {
+  .bg-paper { background: var(--paper); } .bg-surface { background: var(--surface); }
+  .text-ink { color: var(--ink); } .text-muted { color: var(--muted); } .text-jade { color: var(--jade); } .text-coral { color: var(--coral); }
+  .border-line { border-color: var(--line); }
+}
