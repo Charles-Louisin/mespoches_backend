@@ -1,5 +1,5 @@
 import { IUser } from '../models/User';
-import { PLAN_LIMITS } from '../config/planLimits';
+import { PLAN_LIMITS, TRIAL_MONTHS } from '../config/planLimits';
 
 export function isPremiumUser(user: IUser): boolean {
   if (user.role === 'admin') return true;
@@ -12,6 +12,24 @@ export function isPremiumUser(user: IUser): boolean {
     return true;
   }
   return false;
+}
+
+/** Champs à appliquer à la création d'un compte (essai Premium 1 mois). */
+export function getNewUserTrialFields(from: Date = new Date()) {
+  const premiumUntil = new Date(from);
+  premiumUntil.setMonth(premiumUntil.getMonth() + TRIAL_MONTHS);
+  return {
+    plan: 'premium' as const,
+    premiumUntil,
+    premiumSource: 'trial' as const,
+  };
+}
+
+/** Essai gratuit encore actif (Premium non payé). */
+export function isOnTrial(user: IUser): boolean {
+  if (user.role === 'admin') return false;
+  if (user.premiumSource !== 'trial') return false;
+  return isPremiumUser(user);
 }
 
 export function getFreeHistoryStartDate(): Date {

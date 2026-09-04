@@ -8,6 +8,7 @@ export interface ILoginHistoryEntry {
 }
 
 export type UserPlan = 'free' | 'premium';
+export type PremiumSource = 'trial' | 'paid';
 export type AuthProvider = 'email' | 'google';
 
 export interface IUser extends Document {
@@ -23,6 +24,8 @@ export interface IUser extends Document {
   role: 'user' | 'admin';
   plan: UserPlan;
   premiumUntil: Date | null;
+  /** Origine du Premium actif : essai gratuit ou abonnement payé. */
+  premiumSource: PremiumSource | null;
   name?: string;
   currency: string;
   hidePlannedExpensesHelp: boolean;
@@ -98,6 +101,11 @@ const userSchema = new Schema<IUser>(
     },
     premiumUntil: {
       type: Date,
+      default: null,
+    },
+    premiumSource: {
+      type: String,
+      enum: ['trial', 'paid'],
       default: null,
     },
     name: {

@@ -1,7 +1,9 @@
 import { IUser } from '../models/User';
-import { isPremiumUser } from './subscription';
+import { isOnTrial, isPremiumUser } from './subscription';
 
 export function toPublicUser(user: IUser) {
+  const premium = isPremiumUser(user);
+  const onTrial = isOnTrial(user);
   return {
     id: user._id.toString(),
     email: user.email,
@@ -9,7 +11,9 @@ export function toPublicUser(user: IUser) {
     role: user.role,
     plan: user.plan,
     premiumUntil: user.premiumUntil,
-    isPremium: isPremiumUser(user),
+    premiumSource: user.premiumSource ?? null,
+    isPremium: premium,
+    isOnTrial: onTrial,
     emailVerified: user.emailVerified,
     currency: user.currency || 'XAF',
     hidePlannedExpensesHelp: !!user.hidePlannedExpensesHelp,

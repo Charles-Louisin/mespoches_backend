@@ -49,6 +49,7 @@ export async function fulfillSubscriptionPayment(
   await User.findByIdAndUpdate(user._id, {
     plan: 'premium',
     premiumUntil,
+    premiumSource: 'paid',
   });
 
   await SubscriptionPayment.findByIdAndUpdate(payment._id, {

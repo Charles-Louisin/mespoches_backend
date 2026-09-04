@@ -13,6 +13,7 @@ import RecurringTransaction from '../models/RecurringTransaction';
 import PlannedExpense from '../models/PlannedExpense';
 import { protect } from '../middleware/auth';
 import { toPublicUser } from '../utils/userPayload';
+import { getNewUserTrialFields } from '../utils/subscription';
 import {
   setVerificationCode,
   verifyCode,
@@ -154,6 +155,7 @@ router.post('/register', loginLimiter, async (req: Request, res: Response) => {
       role: 'user',
       emailVerified: false,
       currency: value.currency || 'XAF',
+      ...getNewUserTrialFields(),
     });
 
     await setVerificationCode(user);
@@ -552,6 +554,7 @@ router.post('/google', loginLimiter, async (req: Request, res: Response) => {
         googleId,
         authProvider: 'google',
         emailVerified: true,
+        ...getNewUserTrialFields(),
       });
     }
 
