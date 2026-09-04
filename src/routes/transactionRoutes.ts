@@ -654,6 +654,15 @@ const transactionUpdateSchema = Joi.object({
   wallet_id: Joi.string().optional(),
   category_id: Joi.string().allow(null, '').optional(),
   date: Joi.date().iso().optional(),
+  line_items: Joi.array().items(
+    Joi.object({
+      description: Joi.string().allow('').required(),
+      amount: Joi.number().positive().optional(),
+      quantity: Joi.number().integer().min(1).optional(),
+      unit_amount: Joi.number().positive().optional(),
+      type: Joi.string().valid('income', 'expense').optional(),
+    }).unknown(true)
+  ).optional(),
 });
 
 router.put('/:id', protect, async (req: Request, res: Response) => {
@@ -700,6 +709,25 @@ router.put('/:id', protect, async (req: Request, res: Response) => {
       transaction.category_id = value.category_id
         ? new mongoose.Types.ObjectId(value.category_id)
         : null;
+    }
+    if (value.line_items !== undefined) {
+      const existing = transaction.line_items || [];
+      transaction.line_items = (value.line_items as Array<{
+        description?: string;
+        amount?: number;
+        quantity?: number;
+        unit_amount?: number;
+        type?: 'income' | 'expense';
+      }>).map((item, idx) => {
+        const prev = existing[idx];
+        return {
+          description: String(item.description || prev?.description || '').trim(),
+          amount: prev?.amount ?? item.amount ?? 0,
+          quantity: prev?.quantity ?? item.quantity ?? 1,
+          unit_amount: prev?.unit_amount ?? item.unit_amount,
+          type: prev?.type ?? item.type,
+        };
+      });
     }
 
     const walletChanged = newWalletId !== oldWalletId;

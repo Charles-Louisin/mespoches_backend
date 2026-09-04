@@ -2,9 +2,9 @@ import mongoose, { Schema, Document, Model, Types } from 'mongoose';
 
 /** `pending` = pending_validation (jamais validé auto). */
 export type PendingTransactionStatus = 'pending' | 'validated' | 'rejected';
-export type PendingTransactionSource = 'sms' | 'notification' | 'ai_scan' | 'manual';
+export type PendingTransactionSource = 'sms' | 'notification' | 'ai_scan' | 'manual' | 'voice';
 /** Origine fine : image IA, notification parsée, ou extraction IA niveau 3. */
-export type PendingSourceType = 'image' | 'parser' | 'ai' | 'sms' | 'manual';
+export type PendingSourceType = 'image' | 'parser' | 'ai' | 'sms' | 'manual' | 'voice';
 export type MobileOperator = 'orange' | 'mtn' | 'unknown';
 export type SmsPatternKind =
   | 'transfer_out'
@@ -36,6 +36,8 @@ export interface IPendingTransaction extends Document {
   ai_items: Array<{
     description: string;
     amount: number;
+    quantity?: number;
+    unit_amount?: number;
     type: 'income' | 'expense';
   }>;
   validated_transaction_id: Types.ObjectId | null;
@@ -58,12 +60,12 @@ const pendingTransactionSchema = new Schema<IPendingTransaction>(
     },
     source: {
       type: String,
-      enum: ['sms', 'notification', 'ai_scan', 'manual'],
+      enum: ['sms', 'notification', 'ai_scan', 'manual', 'voice'],
       required: true,
     },
     source_type: {
       type: String,
-      enum: ['image', 'parser', 'ai', 'sms', 'manual'],
+      enum: ['image', 'parser', 'ai', 'sms', 'manual', 'voice'],
       default: undefined,
     },
     document_type: { type: String, default: undefined },
@@ -102,6 +104,8 @@ const pendingTransactionSchema = new Schema<IPendingTransaction>(
         {
           description: String,
           amount: Number,
+          quantity: { type: Number, default: 1 },
+          unit_amount: { type: Number },
           type: { type: String, enum: ['income', 'expense'] },
         },
       ],

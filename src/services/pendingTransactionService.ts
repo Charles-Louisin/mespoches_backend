@@ -12,10 +12,13 @@ import {
   learnFromValidation,
 } from './smsHabitService';
 import {
+  aiService,
   imageAnalysisService,
   notificationAnalysisService,
   transactionDraftService,
 } from './ai';
+import { LOW_CONFIDENCE_THRESHOLD } from '../config/aiModels';
+import { maybeSuggestRecurrence } from './recurrenceSuggestionService';
 
 async function buildFromParsed(
   userId: Types.ObjectId,
@@ -143,6 +146,13 @@ export async function validatePendingTransaction(
     category_id?: string | null;
     description?: string;
     date?: Date;
+    ai_items?: Array<{
+      description: string;
+      amount: number;
+      quantity?: number;
+      unit_amount?: number;
+      type?: 'income' | 'expense';
+    }>;
   }
 ): Promise<{ pending: IPendingTransaction; transactionId: Types.ObjectId }> {
   if (pending.status !== 'pending') {
@@ -179,6 +189,29 @@ export async function validatePendingTransaction(
     if (balance_after < 0) throw new Error('Solde insuffisant');
   }
 
+  if (updates?.ai_items && updates.ai_items.length > 0) {
+    // Montants inchangés : on ne remplace que les libellés par index.
+    const base = pending.ai_items?.length ? pending.ai_items : updates.ai_items;
+    pending.ai_items = base.map((item, idx) => ({
+      description:
+        updates.ai_items![idx]?.description?.trim() ||
+        item.description ||
+        '',
+      amount: item.amount,
+      quantity: item.quantity && item.quantity > 1 ? item.quantity : 1,
+      unit_amount: item.unit_amount,
+      type: item.type ?? type,
+    }));
+  }
+
+  const line_items = (pending.ai_items || []).map((i) => ({
+    description: i.description,
+    amount: i.amount,
+    quantity: i.quantity && i.quantity > 1 ? i.quantity : 1,
+    unit_amount: i.unit_amount,
+    type: i.type,
+  }));
+
   const tx = await Transaction.create({
     user_id: userId,
     type,
@@ -189,6 +222,7 @@ export async function validatePendingTransaction(
     date: updates?.date ?? pending.date,
     balance_before,
     balance_after,
+    line_items,
   });
 
   wallet.current_balance = balance_after;
@@ -207,7 +241,7 @@ export async function validatePendingTransaction(
     const identity = await getUserSmsIdentity(userId);
     const reparsed = parseMobileMoneySms(pending.raw_text, identity);
 
-    await learnFromValidation(userId, {
+    const habit = await learnFromValidation(userId, {
       counterparty: pending.counterparty || reparsed?.counterparty || description,
       pattern: pending.pattern || reparsed?.pattern || 'unknown',
       type,
@@ -220,9 +254,45 @@ export async function validatePendingTransaction(
       recipient_phone: reparsed?.recipient_phone,
       userCorrections: !!updates,
     });
+
+    try {
+      await maybeSuggestRecurrence(userId, habit, amount);
+    } catch (err) {
+      console.warn('[RecurrenceSuggest] skipped:', err);
+    }
   }
 
   return { pending, transactionId: tx._id };
+}
+
+export async function createFromVoiceNote(
+  userId: Types.ObjectId,
+  spokenText: string
+): Promise<IPendingTransaction> {
+  const text = spokenText.trim();
+  if (!text) throw new Error('Texte vocal vide');
+
+  const analysis = await aiService.analyzeVoiceText(text);
+  if (!analysis.detected || !analysis.amount || !analysis.type) {
+    throw new Error('Impossible de détecter une transaction dans la note vocale');
+  }
+
+  const warning =
+    analysis.confidence < LOW_CONFIDENCE_THRESHOLD
+      ? "Certaines informations n'ont pas pu être reconnues avec certitude."
+      : undefined;
+
+  return transactionDraftService.createFromVoiceAnalysis({
+    userId,
+    spokenText: text,
+    amount: analysis.amount,
+    type: analysis.type,
+    description: analysis.description,
+    confidence: analysis.confidence,
+    date: analysis.date,
+    items: analysis.items,
+    warning,
+  });
 }
 
 export async function countPending(userId: Types.ObjectId): Promise<number> {

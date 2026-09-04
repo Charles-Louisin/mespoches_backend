@@ -14,12 +14,14 @@ Réponds UNIQUEMENT avec un JSON valide. Aucun texte. Aucune explication. Aucun 
 Format exact:
 {
   "document_type": "receipt|invoice|screenshot|sms_mobile_money|sms_bank|handwritten_list|handwritten_note|other_financial",
-  "summary": "brève description",
+  "summary": "brève description du ticket (ex: Courses Carrefour)",
   "confidence": 0.0,
   "items": [
     {
       "description": "libellé court",
-      "amount": 1500,
+      "amount": 2000,
+      "quantity": 2,
+      "unit_amount": 1000,
       "type": "expense",
       "date": "2026-05-27",
       "currency": "XAF",
@@ -29,6 +31,9 @@ Format exact:
 }
 
 Règles:
+- Pour un ticket de caisse / courses / facture multi-lignes : liste CHAQUE article dans items (pas une seule ligne totale)
+- amount = montant TOTAL de la ligne (quantity × unit_amount). Ex: babouche 1000 × 2 → amount=2000, quantity=2, unit_amount=1000
+- quantity: entier >= 1 (défaut 1). unit_amount: prix unitaire si connu, sinon null
 - amount en nombre (ex: 1500), jamais de texte ni de devise dans amount
 - type: "expense" ou "income"
 - date: "YYYY-MM-DD" ou null (jamais la chaîne "ou null")
@@ -110,6 +115,38 @@ Réponds UNIQUEMENT en JSON:
         ],
       },
     ]
+  }
+
+  buildVoiceTransactionPrompt(spokenText: string): string {
+    return `Tu es l'assistant MES POCHES (Cameroun, XAF/FCFA).
+L'utilisateur dicte une transaction à créer (note vocale transcrite).
+
+Texte:
+"""
+${spokenText}
+"""
+
+Réponds UNIQUEMENT avec un JSON valide. Aucun markdown.
+
+Format exact:
+{
+  "detected": true,
+  "amount": 5000,
+  "type": "expense",
+  "description": "libellé court en français",
+  "category_hint": "nom catégorie ou null",
+  "date": "2026-07-30",
+  "confidence": 0.0,
+  "items": []
+}
+
+Règles:
+- type: "expense" (dépense/achat/paiement) ou "income" (revenu/salaire/reçu)
+- Si plusieurs articles mentionnés (ex: tomate et pain), mets-les dans items[{description,amount,quantity,unit_amount,type}] et amount = somme
+- Sinon items = []
+- Si montant ou intention peu claire: detected=false, amount=null, confidence=0
+- date: YYYY-MM-DD ou null (aujourd'hui si non précisé côté serveur)
+`
   }
 
   textMessages(prompt: string): OpenRouterChatMessage[] {

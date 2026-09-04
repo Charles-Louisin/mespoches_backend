@@ -2,6 +2,8 @@ import mongoose, { Schema, Document, Model, Types } from 'mongoose';
 
 export type RecurringFrequency = 'weekly' | 'monthly';
 
+export type RecurringStatus = 'suggested' | 'active' | 'dismissed';
+
 export interface IRecurringTransaction extends Document {
   user_id: Types.ObjectId;
   type: 'income' | 'expense';
@@ -13,6 +15,9 @@ export interface IRecurringTransaction extends Document {
   day_of_month: number | null;
   next_run_date: Date;
   active: boolean;
+  /** suggested = proposée par l'IA, en attente de validation user */
+  status: RecurringStatus;
+  source: 'user' | 'ai';
   created_at: Date;
 }
 
@@ -48,6 +53,17 @@ const recurringSchema = new Schema<IRecurringTransaction>(
     day_of_month: { type: Number, min: 1, max: 31, default: null },
     next_run_date: { type: Date, required: true },
     active: { type: Boolean, default: true },
+    status: {
+      type: String,
+      enum: ['suggested', 'active', 'dismissed'],
+      default: 'active',
+      index: true,
+    },
+    source: {
+      type: String,
+      enum: ['user', 'ai'],
+      default: 'user',
+    },
     created_at: { type: Date, default: Date.now },
   },
   { timestamps: true }

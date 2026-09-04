@@ -13,6 +13,14 @@ export interface ITransaction extends Document {
   category_id: Types.ObjectId | null;
   savings_goal_id: Types.ObjectId | null;
   description: string;
+  /** Lignes d'un ticket groupé (reçu courses, etc.). */
+  line_items: Array<{
+    description: string;
+    amount: number;
+    quantity?: number;
+    unit_amount?: number;
+    type?: 'income' | 'expense';
+  }>;
   date: Date;
   balance_before: number;
   balance_after: number;
@@ -71,6 +79,18 @@ const transactionSchema = new Schema<ITransaction>(
       type: String,
       trim: true,
       default: '',
+    },
+    line_items: {
+      type: [
+        {
+          description: String,
+          amount: Number,
+          quantity: { type: Number, default: 1 },
+          unit_amount: { type: Number },
+          type: { type: String, enum: ['income', 'expense'] },
+        },
+      ],
+      default: [],
     },
     date: {
       type: Date,

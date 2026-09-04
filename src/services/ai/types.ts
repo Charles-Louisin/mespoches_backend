@@ -13,6 +13,8 @@ export type AiDocumentType =
 export type AiImageItem = {
   description: string
   amount: number
+  quantity?: number
+  unit_amount?: number | null
   type: 'income' | 'expense'
   date?: string | null
   currency?: string

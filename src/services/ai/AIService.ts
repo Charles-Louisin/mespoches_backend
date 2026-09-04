@@ -142,6 +142,63 @@ export class AIService {
     }
   }
 
+  async analyzeVoiceText(spokenText: string): Promise<{
+    detected: boolean
+    amount: number | null
+    type: 'income' | 'expense' | null
+    description: string
+    category_hint: string | null
+    date: string | null
+    confidence: number
+    items: AiImageItem[]
+  }> {
+    const messages = this.prompts.textMessages(
+      this.prompts.buildVoiceTransactionPrompt(spokenText)
+    )
+    const { json } = await this.completeJson({
+      purpose: 'voice_transaction',
+      modality: 'text',
+      messages,
+    })
+    const data = json as Record<string, unknown>
+    const amount = parseLooseAmount(data.amount)
+    const detected = Boolean(data.detected) && amount != null && amount > 0
+    const items: AiImageItem[] = []
+    if (Array.isArray(data.items)) {
+      for (const raw of data.items) {
+        const i = raw as Record<string, unknown>
+        if (!i?.description) continue
+        const lineAmount = parseLooseAmount(i.amount)
+        if (!lineAmount) continue
+        const quantity =
+          typeof i.quantity === 'number' && i.quantity >= 1 ? Math.round(i.quantity) : 1
+        const unitRaw = parseLooseAmount(i.unit_amount)
+        items.push({
+          description: String(i.description).slice(0, 200),
+          amount: lineAmount,
+          quantity,
+          unit_amount: unitRaw ?? (quantity > 1 ? lineAmount / quantity : lineAmount),
+          type: i.type === 'income' ? 'income' : 'expense',
+        })
+      }
+    }
+    return {
+      detected,
+      amount: detected ? amount : null,
+      type: data.type === 'income' ? 'income' : data.type === 'expense' ? 'expense' : null,
+      description: data.description ? String(data.description).slice(0, 200) : 'Note vocale',
+      category_hint: data.category_hint ? String(data.category_hint).slice(0, 80) : null,
+      date: normalizeDate(data.date),
+      confidence:
+        typeof data.confidence === 'number'
+          ? Math.min(1, Math.max(0, data.confidence))
+          : detected
+            ? 0.75
+            : 0,
+      items,
+    }
+  }
+
   formatError(err: unknown): string {
     return formatAiError(err)
   }
@@ -164,9 +221,17 @@ export class AIService {
       if (!i || !i.description) continue
       const amount = parseLooseAmount(i.amount)
       if (!amount) continue
+      const quantity =
+        typeof (i as { quantity?: number }).quantity === 'number' &&
+        (i as { quantity?: number }).quantity! >= 1
+          ? Math.round((i as { quantity: number }).quantity)
+          : 1
+      const unitRaw = parseLooseAmount((i as { unit_amount?: unknown }).unit_amount)
       items.push({
         description: String(i.description).slice(0, 200),
         amount,
+        quantity,
+        unit_amount: unitRaw ?? (quantity > 1 ? amount / quantity : amount),
         type: i.type === 'income' ? 'income' : 'expense',
         date: normalizeDate(i.date),
         currency: i.currency || 'XAF',

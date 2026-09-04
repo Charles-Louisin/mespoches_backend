@@ -23,7 +23,17 @@ router.use(protect, premiumOnly);
 
 router.get('/', async (req: Request, res: Response) => {
   try {
-    const items = await RecurringTransaction.find({ user_id: req.user!._id })
+    const status = req.query.status as string | undefined;
+    const filter: Record<string, unknown> = { user_id: req.user!._id };
+    if (status === 'suggested') {
+      filter.status = 'suggested';
+    } else if (status === 'active' || !status) {
+      filter.$or = [
+        { status: 'active' },
+        { status: { $exists: false }, active: true },
+      ];
+    }
+    const items = await RecurringTransaction.find(filter)
       .populate('wallet_id')
       .populate('category_id')
       .sort({ next_run_date: 1 });
@@ -78,6 +88,9 @@ router.post('/', async (req: Request, res: Response) => {
       ...value,
       category_id: value.category_id || null,
       description: value.description || '',
+      status: 'active',
+      source: 'user',
+      active: true,
     });
 
     const populated = await RecurringTransaction.findById(item._id)
@@ -91,6 +104,46 @@ router.post('/', async (req: Request, res: Response) => {
       success: false,
       message: 'Erreur lors de la création',
     });
+  }
+});
+
+router.post('/:id/accept', async (req: Request, res: Response) => {
+  try {
+    const item = await RecurringTransaction.findOne({
+      _id: req.params.id,
+      user_id: req.user!._id,
+      status: 'suggested',
+    });
+    if (!item) {
+      return res.status(404).json({ success: false, message: 'Suggestion introuvable' });
+    }
+    item.status = 'active';
+    item.active = true;
+    await item.save();
+    const populated = await RecurringTransaction.findById(item._id)
+      .populate('wallet_id')
+      .populate('category_id');
+    return res.json({ success: true, data: populated, message: 'Récurrence activée' });
+  } catch (error) {
+    console.error('Erreur accept recurring:', error);
+    return res.status(500).json({ success: false, message: 'Erreur serveur' });
+  }
+});
+
+router.post('/:id/dismiss', async (req: Request, res: Response) => {
+  try {
+    const item = await RecurringTransaction.findOneAndUpdate(
+      { _id: req.params.id, user_id: req.user!._id, status: 'suggested' },
+      { status: 'dismissed', active: false },
+      { new: true }
+    );
+    if (!item) {
+      return res.status(404).json({ success: false, message: 'Suggestion introuvable' });
+    }
+    return res.json({ success: true, data: item, message: 'Suggestion ignorée' });
+  } catch (error) {
+    console.error('Erreur dismiss recurring:', error);
+    return res.status(500).json({ success: false, message: 'Erreur serveur' });
   }
 });
 

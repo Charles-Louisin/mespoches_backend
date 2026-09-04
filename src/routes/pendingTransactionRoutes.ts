@@ -6,6 +6,7 @@ import {
   createFromSms,
   createFromNotification,
   createFromAiScan,
+  createFromVoiceNote,
   validatePendingTransaction,
   countPending,
 } from '../services/pendingTransactionService';
@@ -107,6 +108,15 @@ const updateSchema = Joi.object({
   category_id: Joi.string().allow(null, ''),
   description: Joi.string().allow('', null),
   date: Joi.date().iso(),
+  ai_items: Joi.array().items(
+    Joi.object({
+      description: Joi.string().allow('').required(),
+      amount: Joi.number().positive().optional(),
+      quantity: Joi.number().integer().min(1).optional(),
+      unit_amount: Joi.number().positive().optional(),
+      type: Joi.string().valid('income', 'expense').optional(),
+    }).unknown(true)
+  ).optional(),
 });
 
 router.put('/:id', async (req: Request, res: Response) => {
@@ -127,9 +137,20 @@ router.put('/:id', async (req: Request, res: Response) => {
       return;
     }
 
-    Object.assign(item, value);
+    const { ai_items: incomingItems, ...rest } = value;
+    Object.assign(item, rest);
     if (value.category_id === '' || value.category_id === null) {
       item.category_id = null;
+    }
+    // Les montants des articles restent ceux extraits : seuls les libellés changent.
+    if (incomingItems && incomingItems.length > 0 && item.ai_items?.length) {
+      item.ai_items = item.ai_items.map((line, idx) => ({
+        description: incomingItems[idx]?.description?.trim() || line.description || '',
+        amount: line.amount,
+        quantity: line.quantity && line.quantity > 1 ? line.quantity : 1,
+        unit_amount: line.unit_amount,
+        type: line.type,
+      }));
     }
     await item.save();
 
@@ -264,6 +285,27 @@ router.post('/parse-notification', async (req: Request, res: Response) => {
     res.status(500).json({
       success: false,
       message: e instanceof Error ? e.message : 'Erreur serveur',
+    });
+  }
+});
+
+router.post('/voice-note', premiumOnly, aiScanLimiter, async (req: Request, res: Response) => {
+  try {
+    const text = String(req.body.text || '').trim();
+    if (!text) {
+      res.status(400).json({ success: false, message: 'Transcription vocale requise' });
+      return;
+    }
+    const item = await createFromVoiceNote(req.user!._id, text);
+    res.status(201).json({
+      success: true,
+      data: item,
+      message: 'Transaction proposée depuis la note vocale',
+    });
+  } catch (e) {
+    res.status(400).json({
+      success: false,
+      message: formatAiError(e),
     });
   }
 });

@@ -84,12 +84,21 @@ export async function applyHabitsAndAi(
   let confidence = habit?.confidence ?? parsed.confidence;
   let ai_enriched = false;
 
+  // Habitude solide (≥3 validations) → on s'appuie dessus, moins d'IA
+  const habitDoc = await SmsHabit.findOne({
+    user_id: userId,
+    counterparty_key: counterpartyKey(parsed.counterparty, parsed.pattern),
+  });
+  const strongHabit = (habitDoc?.validation_count ?? 0) >= 3 && !!habit;
+
   const user = await User.findById(userId);
-  if (user && isPremiumUser(user)) {
+  if (user && isPremiumUser(user) && !strongHabit) {
     try {
       const habits = await SmsHabit.find({ user_id: userId })
         .sort({ validation_count: -1 })
         .limit(40)
+        .populate('wallet_id', 'name')
+        .populate('category_id', 'name')
         .lean();
 
       const habitsLean = habits.map((h) => ({
@@ -98,8 +107,8 @@ export async function applyHabitsAndAi(
         type: h.type,
         description: h.description,
         validation_count: h.validation_count,
-        wallet_id: null as { name?: string } | null,
-        category_id: null as { name?: string } | null,
+        wallet_id: h.wallet_id as { name?: string } | null,
+        category_id: h.category_id as { name?: string } | null,
       }));
 
       const ai = await enrichPendingWithGemini(rawText, parsed, habitsLean);
@@ -107,14 +116,13 @@ export async function applyHabitsAndAi(
         ai_enriched = true;
         if (ai.type) type = ai.type;
         if (ai.description) description = ai.description;
-        if (ai.category_hint) {
-          /* category resolved below if we store category names in habits */
-        }
         confidence = Math.max(confidence, ai.confidence ?? 0.85);
       }
     } catch (err) {
       console.warn('[SmsLearning] AI enrichment skipped:', err);
     }
+  } else if (strongHabit) {
+    confidence = Math.min(0.98, confidence + 0.05);
   }
 
   return {
@@ -143,7 +151,8 @@ export async function learnFromValidation(
     recipient_phone?: string;
     userCorrections?: boolean;
   }
-): Promise<void> {
+) {
+  // return type: Promise<ISmsHabit | null> via findOneAndUpdate
   const key = counterpartyKey(data.counterparty, data.pattern);
 
   const learned_names: string[] = [];
@@ -158,7 +167,7 @@ export async function learnFromValidation(
   if (data.recipient_phone) learned_phones.push(normalizePhone(data.recipient_phone));
   if (data.sender_phone) learned_phones.push(normalizePhone(data.sender_phone));
 
-  await SmsHabit.findOneAndUpdate(
+  return SmsHabit.findOneAndUpdate(
     { user_id: userId, counterparty_key: key },
     {
       $set: {
