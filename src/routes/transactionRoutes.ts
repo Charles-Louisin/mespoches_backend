@@ -8,8 +8,17 @@ import { protect, sendLimitError } from '../middleware/auth';
 import { isPremiumUser, getFreeHistoryStartDate } from '../utils/subscription';
 import { allocateToSavingsGoal } from '../utils/savingsAllocation';
 import { isFutureUtcDay } from '../utils/plannedExpenseDates';
+import { resolveOwnedCategoryId } from '../utils/ownership';
 
 const router = Router();
+
+const lineItemSchema = Joi.object({
+  description: Joi.string().allow('').required(),
+  amount: Joi.number().positive().required(),
+  quantity: Joi.number().integer().min(1).optional(),
+  unit_amount: Joi.number().positive().optional(),
+  type: Joi.string().valid('income', 'expense').optional(),
+}).unknown(true);
 
 const baseSchema = {
   amount: Joi.number().positive().required(),
@@ -17,6 +26,7 @@ const baseSchema = {
   category_id: Joi.string().allow(null, ''),
   description: Joi.string().allow('', null),
   date: Joi.date().iso().optional(),
+  line_items: Joi.array().items(lineItemSchema).max(50).optional(),
 };
 
 const incomeSchema = Joi.object({
@@ -41,6 +51,13 @@ interface TransactionInput {
   description?: string | null;
   date?: Date;
   savings_goal_id?: string | null;
+  line_items?: Array<{
+    description: string;
+    amount: number;
+    quantity?: number;
+    unit_amount?: number;
+    type?: 'income' | 'expense';
+  }>;
 }
 
 async function createTransactionAndUpdateWallet({
@@ -62,25 +79,54 @@ async function createTransactionAndUpdateWallet({
     throw new Error('Portefeuille introuvable');
   }
 
+  const lineItems = (data.line_items || [])
+    .map((item) => ({
+      description: String(item.description || '').trim(),
+      amount: Number(item.amount) || 0,
+      quantity: item.quantity ?? 1,
+      unit_amount: item.unit_amount,
+      type: item.type || type,
+    }))
+    .filter((item) => item.amount > 0);
+
+  const amountFromLines =
+    lineItems.length > 0
+      ? lineItems.reduce((sum, item) => sum + item.amount, 0)
+      : 0;
+  const amount = amountFromLines > 0 ? amountFromLines : data.amount;
+
+  if (!amount || amount <= 0) {
+    throw new Error('Montant invalide');
+  }
+
   const balance_before = wallet.current_balance;
   let balance_after = balance_before;
 
   if (type === 'income') {
-    balance_after = balance_before + data.amount;
+    balance_after = balance_before + amount;
   } else if (type === 'expense') {
-    balance_after = balance_before - data.amount;
+    balance_after = balance_before - amount;
     if (balance_after < 0) {
       throw new Error('Solde insuffisant pour cette dépense');
     }
   }
 
+  const categoryId = await resolveOwnedCategoryId(userId, data.category_id);
+
+  const description =
+    data.description ||
+    (lineItems.length > 1
+      ? `${lineItems.length} articles`
+      : lineItems[0]?.description || '');
+
   const transaction = await Transaction.create({
     user_id: userId,
     type,
-    amount: data.amount,
+    amount,
     wallet_id: data.wallet_id,
-    category_id: data.category_id || null,
-    description: data.description || '',
+    category_id: categoryId,
+    description,
+    line_items: lineItems,
     date: data.date || new Date(),
     balance_before,
     balance_after,
@@ -706,9 +752,20 @@ router.put('/:id', protect, async (req: Request, res: Response) => {
       transaction.date = new Date(value.date);
     }
     if (value.category_id !== undefined) {
-      transaction.category_id = value.category_id
-        ? new mongoose.Types.ObjectId(value.category_id)
-        : null;
+      try {
+        const owned = await resolveOwnedCategoryId(
+          req.user!._id,
+          value.category_id
+        );
+        transaction.category_id = owned
+          ? new mongoose.Types.ObjectId(owned)
+          : null;
+      } catch (e) {
+        return res.status(400).json({
+          success: false,
+          message: e instanceof Error ? e.message : 'Catégorie invalide',
+        });
+      }
     }
     if (value.line_items !== undefined) {
       const existing = transaction.line_items || [];

@@ -95,6 +95,24 @@ export const aiScanLimiter = rateLimit({
   },
 });
 
+/** Parse SMS / notifications Mobile Money (coût IA + spam). */
+export const parseIngestLimiter = rateLimit({
+  ...rateLimitBase,
+  windowMs: 60 * 60 * 1000,
+  max: 120,
+  keyGenerator: (req) => {
+    const uid = req.user?._id ? String(req.user._id) : clientIp(req);
+    return `parse-ingest:${uid}`;
+  },
+  message: {
+    success: false,
+    code: 'RATE_LIMITED',
+    message: 'Trop de notifications analysées. Réessayez dans une heure.',
+  },
+});
+
+export const MAX_PARSE_TEXT_CHARS = 4000;
+
 export function escapeHtml(input: unknown): string {
   return String(input ?? '')
     .replace(/&/g, '&amp;')

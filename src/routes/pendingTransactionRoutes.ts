@@ -13,7 +13,7 @@ import {
 import { getSmsHabitsSummary } from '../services/smsHabitService';
 import { analyzeSmsRecurrences } from '../utils/geminiSmsLearning';
 import { formatAiError } from '../services/ai';
-import { aiScanLimiter } from '../utils/security';
+import { aiScanLimiter, parseIngestLimiter, MAX_PARSE_TEXT_CHARS } from '../utils/security';
 
 const router = Router();
 
@@ -138,6 +138,21 @@ router.put('/:id', async (req: Request, res: Response) => {
     }
 
     const { ai_items: incomingItems, ...rest } = value;
+    if (rest.category_id !== undefined) {
+      try {
+        const { resolveOwnedCategoryId } = await import('../utils/ownership');
+        rest.category_id = await resolveOwnedCategoryId(
+          req.user!._id,
+          rest.category_id
+        );
+      } catch (e) {
+        res.status(400).json({
+          success: false,
+          message: e instanceof Error ? e.message : 'Catégorie invalide',
+        });
+        return;
+      }
+    }
     Object.assign(item, rest);
     if (value.category_id === '' || value.category_id === null) {
       item.category_id = null;
@@ -218,9 +233,9 @@ router.post('/:id/reject', async (req: Request, res: Response) => {
   }
 });
 
-router.post('/parse-sms', async (req: Request, res: Response) => {
+router.post('/parse-sms', parseIngestLimiter, async (req: Request, res: Response) => {
   try {
-    const text = String(req.body.text || '').trim();
+    const text = String(req.body.text || '').trim().slice(0, MAX_PARSE_TEXT_CHARS);
     if (!text) {
       res.status(400).json({ success: false, message: 'Texte SMS requis' });
       return;
@@ -249,12 +264,12 @@ router.post('/parse-sms', async (req: Request, res: Response) => {
   }
 });
 
-router.post('/parse-notification', async (req: Request, res: Response) => {
+router.post('/parse-notification', parseIngestLimiter, async (req: Request, res: Response) => {
   try {
-    const title = String(req.body.title || '').trim();
-    const body = String(req.body.body || '').trim();
+    const title = String(req.body.title || '').trim().slice(0, 500);
+    const body = String(req.body.body || '').trim().slice(0, MAX_PARSE_TEXT_CHARS);
     const packageName = req.body.packageName
-      ? String(req.body.packageName).trim()
+      ? String(req.body.packageName).trim().slice(0, 200)
       : undefined;
     if (!title && !body) {
       res.status(400).json({ success: false, message: 'Titre ou corps requis' });
@@ -291,7 +306,7 @@ router.post('/parse-notification', async (req: Request, res: Response) => {
 
 router.post('/voice-note', premiumOnly, aiScanLimiter, async (req: Request, res: Response) => {
   try {
-    const text = String(req.body.text || '').trim();
+    const text = String(req.body.text || '').trim().slice(0, MAX_PARSE_TEXT_CHARS);
     if (!text) {
       res.status(400).json({ success: false, message: 'Transcription vocale requise' });
       return;

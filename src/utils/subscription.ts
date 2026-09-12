@@ -14,7 +14,7 @@ export function isPremiumUser(user: IUser): boolean {
   return false;
 }
 
-/** Champs à appliquer à la création d'un compte (essai Premium 1 mois). */
+/** Champs d'essai Premium 1 mois — à appliquer à la vérification email (ou Google immédiat). */
 export function getNewUserTrialFields(from: Date = new Date()) {
   const premiumUntil = new Date(from);
   premiumUntil.setMonth(premiumUntil.getMonth() + TRIAL_MONTHS);
@@ -23,6 +23,24 @@ export function getNewUserTrialFields(from: Date = new Date()) {
     premiumUntil,
     premiumSource: 'trial' as const,
   };
+}
+
+/**
+ * Si premiumUntil est dépassé, repasse plan à free en base.
+ * À appeler sur les requêtes authentifiées.
+ */
+export async function syncExpiredPremium(user: IUser): Promise<void> {
+  if (user.role === 'admin') return;
+
+  const until = user.premiumUntil ? new Date(user.premiumUntil) : null;
+  const expired =
+    user.plan === 'premium' && until !== null && until.getTime() <= Date.now();
+
+  if (!expired) return;
+
+  user.plan = 'free';
+  user.premiumSource = null;
+  await user.save();
 }
 
 /** Essai gratuit encore actif (Premium non payé). */

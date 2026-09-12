@@ -19,6 +19,7 @@ import {
 } from './ai';
 import { LOW_CONFIDENCE_THRESHOLD } from '../config/aiModels';
 import { maybeSuggestRecurrence } from './recurrenceSuggestionService';
+import { resolveOwnedCategoryId } from '../utils/ownership';
 
 async function buildFromParsed(
   userId: Types.ObjectId,
@@ -163,12 +164,14 @@ export async function validatePendingTransaction(
   const type = updates?.type ?? pending.type;
   const walletId = updates?.wallet_id ?? pending.wallet_id;
   const description = updates?.description ?? pending.description;
-  const categoryId =
+  let categoryId: string | null =
     updates?.category_id !== undefined
       ? updates.category_id
       : pending.category_id
         ? String(pending.category_id)
         : null;
+
+  categoryId = await resolveOwnedCategoryId(userId, categoryId);
 
   if (!walletId) {
     throw new Error('Choisissez une poche pour valider');

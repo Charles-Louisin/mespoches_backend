@@ -11,9 +11,13 @@ import Budget from '../models/Budget';
 import SavingsGoal from '../models/SavingsGoal';
 import RecurringTransaction from '../models/RecurringTransaction';
 import PlannedExpense from '../models/PlannedExpense';
+import PendingTransaction from '../models/PendingTransaction';
+import SmsHabit from '../models/SmsHabit';
+import NotificationPattern from '../models/NotificationPattern';
+import SubscriptionPayment from '../models/SubscriptionPayment';
 import { protect } from '../middleware/auth';
 import { toPublicUser } from '../utils/userPayload';
-import { getNewUserTrialFields } from '../utils/subscription';
+import { getNewUserTrialFields, syncExpiredPremium } from '../utils/subscription';
 import {
   setVerificationCode,
   verifyCode,
@@ -30,7 +34,7 @@ const router = Router();
 
 router.use(authIpLimiter);
 
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '12h';
 
 const generateToken = (user: IUser): string => {
   return jwt.sign(
@@ -38,11 +42,17 @@ const generateToken = (user: IUser): string => {
       id: user._id,
       role: user.role,
       emailVerified: !!user.emailVerified,
+      tv: user.tokenVersion ?? 0,
     },
     process.env.JWT_SECRET as string,
     { expiresIn: JWT_EXPIRES_IN as jwt.SignOptions['expiresIn'] }
   );
 };
+
+/** Invalide tous les JWT déjà émis pour cet utilisateur. */
+async function revokeAllSessions(user: IUser): Promise<void> {
+  user.tokenVersion = (user.tokenVersion ?? 0) + 1;
+}
 
 const CURRENCY_VALUES = ['XAF', 'XOF', 'EURO', 'DOLLARS'];
 
@@ -155,7 +165,9 @@ router.post('/register', loginLimiter, async (req: Request, res: Response) => {
       role: 'user',
       emailVerified: false,
       currency: value.currency || 'XAF',
-      ...getNewUserTrialFields(),
+      plan: 'free',
+      premiumUntil: null,
+      premiumSource: null,
     });
 
     await setVerificationCode(user);
@@ -222,6 +234,7 @@ router.post('/login', loginLimiter, async (req: Request, res: Response) => {
 
     recordLogin(user, req);
     await user.save();
+    await syncExpiredPremium(user);
 
     const token = generateToken(user);
 
@@ -292,6 +305,8 @@ router.post('/verify-email', otpLimiter, async (req: Request, res: Response) => 
     user.verificationCode = null;
     user.verificationCodeExpires = null;
     user.verificationAttempts = 0;
+    // L'essai Premium commence uniquement après vérification de l'email.
+    Object.assign(user, getNewUserTrialFields());
     await user.save();
 
     const token = generateToken(user);
@@ -433,6 +448,10 @@ router.delete('/me', protect, async (req: Request, res: Response) => {
       SavingsGoal.deleteMany({ user_id: userId }),
       RecurringTransaction.deleteMany({ user_id: userId }),
       PlannedExpense.deleteMany({ user_id: userId }),
+      PendingTransaction.deleteMany({ user_id: userId }),
+      SmsHabit.deleteMany({ user_id: userId }),
+      NotificationPattern.deleteMany({ user_id: userId }),
+      SubscriptionPayment.deleteMany({ user_id: userId }),
       User.deleteOne({ _id: userId }),
     ]);
 
@@ -445,6 +464,24 @@ router.delete('/me', protect, async (req: Request, res: Response) => {
     return res.status(500).json({
       success: false,
       message: 'Erreur lors de la suppression du compte',
+    });
+  }
+});
+
+/** Invalide toutes les sessions JWT de l'utilisateur. */
+router.post('/logout', protect, async (req: Request, res: Response) => {
+  try {
+    const user = await User.findById(req.user!._id);
+    if (user) {
+      await revokeAllSessions(user);
+      await user.save();
+    }
+    return res.json({ success: true, message: 'Déconnecté' });
+  } catch (error) {
+    console.error('Erreur logout:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Erreur lors de la déconnexion',
     });
   }
 });
@@ -465,6 +502,9 @@ function recordLogin(user: IUser, req: Request): void {
   user.lastLoginAt = now;
   user.loginHistory = user.loginHistory || [];
   user.loginHistory.push({ date: now, ip, userAgent });
+  if (user.loginHistory.length > 20) {
+    user.loginHistory = user.loginHistory.slice(-20);
+  }
 }
 
 const googleSchema = Joi.object({
@@ -528,17 +568,47 @@ router.post('/google', loginLimiter, async (req: Request, res: Response) => {
     const email = payload.email.toLowerCase().trim();
     const name = (payload.name || payload.given_name || '').trim();
 
-    let user = await User.findOne({
-      $or: [{ googleId }, { email }],
-    });
+    let user = await User.findOne({ googleId });
 
-    if (user) {
-      if (!user.googleId) {
-        user.googleId = googleId;
+    if (!user) {
+      const byEmail = await User.findOne({ email }).select('+password');
+      if (byEmail) {
+        // Empêche la prise de compte : un email non vérifié ne peut pas être
+        // fusionné avec Google (sinon l'attaquant garde le mot de passe).
+        if (!byEmail.emailVerified) {
+          await User.deleteOne({ _id: byEmail._id });
+          user = new User({
+            email,
+            name: name || undefined,
+            googleId,
+            authProvider: 'google',
+            emailVerified: true,
+            ...getNewUserTrialFields(),
+          });
+        } else {
+          // Compte email vérifié : liaison Google + invalidation du mot de passe
+          // pour éviter un double accès après compromission / phishing.
+          byEmail.googleId = googleId;
+          byEmail.authProvider = 'google';
+          byEmail.password = undefined;
+          byEmail.set('password', undefined);
+          byEmail.verificationCode = null;
+          byEmail.verificationCodeExpires = null;
+          await revokeAllSessions(byEmail);
+          if (name && !byEmail.name) byEmail.name = name;
+          user = byEmail;
+        }
+      } else {
+        user = new User({
+          email,
+          name: name || undefined,
+          googleId,
+          authProvider: 'google',
+          emailVerified: true,
+          ...getNewUserTrialFields(),
+        });
       }
-      if (user.authProvider !== 'google' && !user.password) {
-        user.authProvider = 'google';
-      }
+    } else {
       if (!user.emailVerified) {
         user.emailVerified = true;
         user.verificationCode = null;
@@ -547,19 +617,16 @@ router.post('/google', loginLimiter, async (req: Request, res: Response) => {
       if (name && !user.name) {
         user.name = name;
       }
-    } else {
-      user = new User({
-        email,
-        name: name || undefined,
-        googleId,
-        authProvider: 'google',
-        emailVerified: true,
-        ...getNewUserTrialFields(),
-      });
     }
 
     recordLogin(user, req);
     await user.save();
+    await syncExpiredPremium(user);
+
+    // Après unset password, s'assurer que le champ n'est plus en base
+    if (user.authProvider === 'google' && user.password === undefined) {
+      await User.updateOne({ _id: user._id }, { $unset: { password: 1 } });
+    }
 
     const token = generateToken(user);
 

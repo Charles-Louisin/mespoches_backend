@@ -31,6 +31,8 @@ export interface IUser extends Document {
   hidePlannedExpensesHelp: boolean;
   lastLoginAt: Date | null;
   loginHistory: ILoginHistoryEntry[];
+  /** Incrémente pour invalider tous les JWT existants (logout, compromission, liaison Google). */
+  tokenVersion: number;
   created_at: Date;
   comparePassword(candidatePassword: string): Promise<boolean>;
 }
@@ -132,6 +134,11 @@ const userSchema = new Schema<IUser>(
         userAgent: { type: String, default: null },
       },
     ],
+    tokenVersion: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     created_at: {
       type: Date,
       default: Date.now,

@@ -3,6 +3,8 @@
  * @see cinetpay/ dans le dépôt
  */
 
+import crypto from 'crypto';
+
 const SANDBOX_API_BASE = 'https://api.cinetpay.net';
 const PRODUCTION_API_BASE = 'https://api.cinetpay.co';
 
@@ -367,9 +369,8 @@ export function isCinetPayPaymentPending(status: CinetPayPaymentStatus): boolean
 
 /** merchant_transaction_id — max 30 caractères (doc CinetPay) */
 export function generateMerchantTransactionId(): string {
-  const ts = Date.now().toString(36).slice(-8);
-  const rand = Math.random().toString(36).slice(2, 6);
-  return `MP${ts}${rand}`.slice(0, 30);
+  const rand = crypto.randomBytes(10).toString('hex');
+  return `MP${rand}`.slice(0, 30);
 }
 
 /** @deprecated Utiliser generateMerchantTransactionId */

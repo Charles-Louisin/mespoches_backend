@@ -3,7 +3,7 @@ export const PLAN_LIMITS = {
   FREE_HISTORY_MONTHS: 3,
 } as const;
 
-/** Essai Premium offert à chaque nouveau compte (1 mois calendaire). */
+/** Essai Premium offert après vérification email (1 mois calendaire). */
 export const TRIAL_MONTHS = 1;
 
 export const PREMIUM_REQUIRED_CODE = 'PREMIUM_REQUIRED';

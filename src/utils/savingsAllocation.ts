@@ -2,6 +2,7 @@ import { Types } from 'mongoose';
 import SavingsGoal from '../models/SavingsGoal';
 import Wallet from '../models/Wallet';
 import Transaction, { ITransaction } from '../models/Transaction';
+import { resolveOwnedCategoryId } from './ownership';
 
 interface AllocateInput {
   userId: Types.ObjectId;
@@ -69,13 +70,15 @@ export async function allocateToSavingsGoal(
     input.description?.trim() ||
     `Épargne → ${goal.title}`;
 
+  const categoryId = await resolveOwnedCategoryId(input.userId, input.category_id);
+
   const transaction = await Transaction.create({
     user_id: input.userId,
     type: input.type,
     amount: input.amount,
     wallet_id: walletId,
     savings_goal_id: input.savings_goal_id,
-    category_id: input.category_id || null,
+    category_id: categoryId,
     description: desc,
     date: input.date || new Date(),
     balance_before,

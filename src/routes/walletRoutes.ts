@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import Joi from 'joi';
+import { Types } from 'mongoose';
 import Wallet from '../models/Wallet';
 import Transaction from '../models/Transaction';
 import PlannedExpense from '../models/PlannedExpense';
@@ -17,6 +18,7 @@ const walletSchema = Joi.object({
   name: Joi.string().required(),
   currency: Joi.string().default('XAF'),
   image_url: Joi.string().uri().allow(null, '').optional(),
+  initial_balance: Joi.number().min(0).max(1_000_000_000).optional(),
 });
 
 const walletUpdateSchema = Joi.object({
@@ -32,10 +34,53 @@ router.get('/', protect, async (req: Request, res: Response) => {
       is_deleted: { $ne: true },
     }).sort({ created_at: -1 });
 
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+
+    const monthAgg = await Transaction.aggregate<{
+      _id: { wallet_id: Types.ObjectId; type: string };
+      total: number;
+    }>([
+      {
+        $match: {
+          user_id: req.user!._id,
+          type: { $in: ['income', 'expense'] },
+          wallet_id: { $ne: null },
+          date: { $gte: monthStart, $lte: monthEnd },
+        },
+      },
+      {
+        $group: {
+          _id: { wallet_id: '$wallet_id', type: '$type' },
+          total: { $sum: '$amount' },
+        },
+      },
+    ]);
+
+    const monthByWallet = new Map<string, { income: number; expense: number }>();
+    for (const row of monthAgg) {
+      const key = String(row._id.wallet_id);
+      const cur = monthByWallet.get(key) || { income: 0, expense: 0 };
+      if (row._id.type === 'income') cur.income = row.total;
+      if (row._id.type === 'expense') cur.expense = row.total;
+      monthByWallet.set(key, cur);
+    }
+
+    const data = wallets.map((w) => {
+      const stats = monthByWallet.get(String(w._id)) || { income: 0, expense: 0 };
+      const plain = w.toObject();
+      return {
+        ...plain,
+        month_income: stats.income,
+        month_expense: stats.expense,
+      };
+    });
+
     return res.json({
       success: true,
-      count: wallets.length,
-      data: wallets,
+      count: data.length,
+      data,
     });
   } catch (error) {
     console.error('Erreur get wallets:', error);
@@ -180,14 +225,29 @@ router.post('/', protect, async (req: Request, res: Response) => {
     }
 
     const userCurrency = req.user!.currency || 'XAF';
+    const initialBalance = Math.max(0, Number(value.initial_balance) || 0);
 
     const wallet = await Wallet.create({
       user_id: req.user!._id,
       name: payload.name,
       currency: userCurrency,
       image_url: payload.image_url || null,
-      current_balance: 0,
+      current_balance: initialBalance,
     });
+
+    if (initialBalance > 0) {
+      await Transaction.create({
+        user_id: req.user!._id,
+        type: 'income',
+        amount: initialBalance,
+        wallet_id: wallet._id,
+        category_id: null,
+        description: 'Solde initial',
+        date: new Date(),
+        balance_before: 0,
+        balance_after: initialBalance,
+      });
+    }
 
     return res.status(201).json({
       success: true,

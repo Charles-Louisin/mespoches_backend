@@ -62,18 +62,23 @@ async function handleCinetPayNotification(req: Request, res: Response) {
     return res.status(200).json({ received: true, skipped: 'unknown_payment' });
   }
 
-  // Si un notify_token a été stocké à l'init, il est obligatoire et doit correspondre.
-  if (payment.cinetpay_notify_token) {
-    if (
-      !payload.notify_token ||
-      !safeTokenEqual(payload.notify_token, payment.cinetpay_notify_token)
-    ) {
-      console.warn(
-        'Webhook CinetPay: notify_token manquant ou invalide pour',
-        merchantTransactionId
-      );
-      return res.status(403).json({ received: false, error: 'invalid_notify_token' });
-    }
+  // notify_token obligatoire pour tout paiement (anti-webhook forgé).
+  if (!payment.cinetpay_notify_token) {
+    console.warn(
+      'Webhook CinetPay: paiement sans notify_token stocké',
+      merchantTransactionId
+    );
+    return res.status(403).json({ received: false, error: 'missing_stored_notify_token' });
+  }
+  if (
+    !payload.notify_token ||
+    !safeTokenEqual(payload.notify_token, payment.cinetpay_notify_token)
+  ) {
+    console.warn(
+      'Webhook CinetPay: notify_token manquant ou invalide pour',
+      merchantTransactionId
+    );
+    return res.status(403).json({ received: false, error: 'invalid_notify_token' });
   }
 
   if (

@@ -1,12 +1,13 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import User, { IUser } from '../models/User';
-import { isPremiumUser } from '../utils/subscription';
+import { isPremiumUser, syncExpiredPremium } from '../utils/subscription';
 import { PREMIUM_REQUIRED_CODE } from '../config/planLimits';
 
 interface JwtPayload {
   id: string;
   role: string;
+  tv?: number;
 }
 
 export async function protect(
@@ -36,6 +37,16 @@ export async function protect(
         return;
       }
 
+      const tokenVersion = user.tokenVersion ?? 0;
+      if ((decoded.tv ?? 0) !== tokenVersion) {
+        res.status(401).json({
+          success: false,
+          code: 'SESSION_REVOKED',
+          message: 'Session expirée. Reconnectez-vous.',
+        });
+        return;
+      }
+
       if (!user.emailVerified) {
         res.status(403).json({
           success: false,
@@ -45,6 +56,8 @@ export async function protect(
         });
         return;
       }
+
+      await syncExpiredPremium(user);
 
       req.user = user as IUser;
       next();
