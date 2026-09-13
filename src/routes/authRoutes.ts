@@ -542,6 +542,8 @@ function isAllowedOAuthRedirectUri(uri: string): boolean {
         ...(process.env.CORS_ORIGIN || '').split(','),
         process.env.APP_URL,
         'https://mespoches.vercel.app',
+        'https://mespoches.store',
+        'https://www.mespoches.store',
       ]
         .map((o) => o?.trim().replace(/\/$/, ''))
         .filter(Boolean)
