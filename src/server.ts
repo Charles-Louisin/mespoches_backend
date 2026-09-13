@@ -67,10 +67,25 @@ if (isProduction && configuredOrigins.length === 0) {
   process.exit(1);
 }
 
+function isAllowedCorsOrigin(origin: string): boolean {
+  if (configuredOrigins.includes(origin)) return true;
+  try {
+    const host = new URL(origin).hostname.toLowerCase();
+    if (host === 'mespoches.store' || host.endsWith('.mespoches.store')) {
+      return true;
+    }
+    if (host === 'mespoches.vercel.app' || host.endsWith('.vercel.app')) {
+      return true;
+    }
+  } catch {
+    /* ignore */
+  }
+  return false;
+}
+
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Requêtes same-origin / outils serveur (pas d’Origin)
       if (!origin) {
         callback(null, true);
         return;
@@ -79,7 +94,7 @@ app.use(
         callback(null, true);
         return;
       }
-      if (configuredOrigins.includes(origin)) {
+      if (isAllowedCorsOrigin(origin)) {
         callback(null, true);
         return;
       }
