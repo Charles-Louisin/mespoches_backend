@@ -20,6 +20,7 @@ import { toPublicUser } from '../utils/userPayload';
 import { getNewUserTrialFields, syncExpiredPremium } from '../utils/subscription';
 import {
   setVerificationCode,
+  setPasswordResetCode,
   verifyCode,
   getResendCooldownSeconds,
 } from '../utils/verification';
@@ -198,8 +199,9 @@ router.post('/login', loginLimiter, async (req: Request, res: Response) => {
     }
 
     const { email, password } = value;
+    const emailNorm = email.trim().toLowerCase();
 
-    const user = await User.findOne({ email }).select('+password');
+    const user = await User.findOne({ email: emailNorm }).select('+password');
     if (!user) {
       return res.status(401).json({
         success: false,
@@ -207,11 +209,13 @@ router.post('/login', loginLimiter, async (req: Request, res: Response) => {
       });
     }
 
-    if (user.authProvider === 'google' && !user.password) {
+    // Compte Google sans mot de passe : proposer d'en définir un
+    if (!user.password) {
       return res.status(401).json({
         success: false,
-        code: 'USE_GOOGLE',
-        message: 'Ce compte utilise Google. Cliquez sur « Continuer avec Google ».',
+        code: 'NEED_PASSWORD',
+        message:
+          'Ce compte n’a pas encore de mot de passe. Cliquez sur « Mot de passe oublié » pour en créer un (code envoyé par email).',
       });
     }
 
@@ -232,6 +236,11 @@ router.post('/login', loginLimiter, async (req: Request, res: Response) => {
       });
     }
 
+    // Si Google est aussi lié, marquer le compte comme double auth
+    if (user.googleId && user.authProvider === 'email') {
+      user.authProvider = 'both';
+    }
+
     recordLogin(user, req);
     await user.save();
     await syncExpiredPremium(user);
@@ -250,6 +259,138 @@ router.post('/login', loginLimiter, async (req: Request, res: Response) => {
     return res.status(500).json({
       success: false,
       message: 'Erreur lors de la connexion',
+    });
+  }
+});
+
+const forgotPasswordSchema = Joi.object({
+  email: Joi.string().email().required(),
+});
+
+const resetPasswordSchema = Joi.object({
+  email: Joi.string().email().required(),
+  code: Joi.string().length(6).pattern(/^\d+$/).required(),
+  password: Joi.string().min(10).max(128).required(),
+});
+
+/**
+ * Envoie un code Resend pour définir / réinitialiser le mot de passe.
+ * Réponse toujours générique (pas d’énumération d’emails).
+ */
+router.post('/forgot-password', otpLimiter, async (req: Request, res: Response) => {
+  try {
+    const { error, value } = forgotPasswordSchema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email invalide',
+      });
+    }
+
+    const email = value.email.trim().toLowerCase();
+    const user = await User.findOne({ email }).select(
+      '+verificationCode +password'
+    );
+
+    if (user) {
+      const cooldown = getResendCooldownSeconds(user);
+      if (cooldown > 0) {
+        return res.status(429).json({
+          success: false,
+          code: 'RESEND_COOLDOWN',
+          message: `Veuillez attendre ${cooldown} seconde(s) avant de renvoyer le code`,
+          data: { cooldownSeconds: cooldown },
+        });
+      }
+      try {
+        await setPasswordResetCode(user);
+      } catch (err) {
+        console.error('Erreur envoi reset password:', err);
+        return res.status(500).json({
+          success: false,
+          message: "Impossible d'envoyer l'email. Réessayez plus tard.",
+        });
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message:
+        'Si un compte existe pour cet email, un code de vérification a été envoyé.',
+      data: { email },
+    });
+  } catch (error) {
+    console.error('Erreur forgot-password:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Erreur lors de la demande',
+    });
+  }
+});
+
+/** Vérifie le code email puis définit le nouveau mot de passe. */
+router.post('/reset-password', otpLimiter, async (req: Request, res: Response) => {
+  try {
+    const { error, value } = resetPasswordSchema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+
+    const email = value.email.trim().toLowerCase();
+    const user = await User.findOne({ email }).select(
+      '+verificationCode +password'
+    );
+    if (!user) {
+      return res.status(400).json({
+        success: false,
+        message: 'Code invalide ou email inconnu',
+      });
+    }
+
+    const result = await verifyCode(user, value.code);
+    if (result === 'locked') {
+      return res.status(429).json({
+        success: false,
+        code: 'OTP_LOCKED',
+        message: 'Trop de tentatives. Demandez un nouveau code.',
+      });
+    }
+    if (result !== 'ok') {
+      return res.status(400).json({
+        success: false,
+        message: 'Code invalide ou expiré',
+      });
+    }
+
+    user.password = value.password;
+    user.verificationCode = null;
+    user.verificationCodeExpires = null;
+    user.emailVerified = true;
+    if (user.googleId) {
+      user.authProvider = 'both';
+    } else if (user.authProvider === 'google') {
+      user.authProvider = 'email';
+    }
+    await revokeAllSessions(user);
+    await user.save();
+
+    const token = generateToken(user);
+    return res.status(200).json({
+      success: true,
+      message: 'Mot de passe mis à jour. Vous êtes connecté.',
+      data: {
+        user: toPublicUser(user),
+        token,
+      },
+    });
+  } catch (error) {
+    console.error('Erreur reset-password:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Erreur lors de la réinitialisation',
     });
   }
 });
@@ -603,14 +744,16 @@ async function completeGoogleLogin(
   if (!user) {
     const byEmail = await User.findOne({ email }).select('+password');
     if (byEmail) {
+      // Liaison Google : on GARDE le mot de passe s'il existe (double connexion).
       byEmail.googleId = googleId;
-      byEmail.authProvider = 'google';
       byEmail.emailVerified = true;
-      byEmail.password = undefined;
-      byEmail.set('password', undefined);
       byEmail.verificationCode = null;
       byEmail.verificationCodeExpires = null;
-      await revokeAllSessions(byEmail);
+      if (byEmail.password) {
+        byEmail.authProvider = 'both';
+      } else {
+        byEmail.authProvider = 'google';
+      }
       if (name && !byEmail.name) byEmail.name = name;
       user = byEmail;
     } else {
@@ -637,10 +780,6 @@ async function completeGoogleLogin(
   recordLogin(user, req);
   await user.save();
   await syncExpiredPremium(user);
-
-  if (user.authProvider === 'google' && user.password === undefined) {
-    await User.updateOne({ _id: user._id }, { $unset: { password: 1 } });
-  }
 
   const token = generateToken(user);
 

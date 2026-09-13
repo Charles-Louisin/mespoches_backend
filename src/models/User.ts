@@ -9,7 +9,7 @@ export interface ILoginHistoryEntry {
 
 export type UserPlan = 'free' | 'premium';
 export type PremiumSource = 'trial' | 'paid';
-export type AuthProvider = 'email' | 'google';
+export type AuthProvider = 'email' | 'google' | 'both';
 
 export interface IUser extends Document {
   email: string;
@@ -51,7 +51,8 @@ const userSchema = new Schema<IUser>(
       type: String,
       required: [
         function (this: IUser) {
-          return this.authProvider !== 'google' && !this.googleId;
+          // Google seul : pas de mot de passe obligatoire
+          return this.authProvider === 'email' || this.authProvider === 'both';
         },
         'Le mot de passe est requis',
       ],
@@ -66,7 +67,7 @@ const userSchema = new Schema<IUser>(
     },
     authProvider: {
       type: String,
-      enum: ['email', 'google'],
+      enum: ['email', 'google', 'both'],
       default: 'email',
     },
     emailVerified: {

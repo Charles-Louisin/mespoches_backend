@@ -44,6 +44,37 @@ export async function sendVerificationEmail(
   }
 }
 
+export async function sendPasswordResetEmail(
+  to: string,
+  code: string
+): Promise<void> {
+  if (!process.env.RESEND_API_KEY) {
+    throw new Error('RESEND_API_KEY manquant');
+  }
+
+  const { error } = await resend.emails.send({
+    from: FROM_EMAIL,
+    to,
+    ...(REPLY_TO ? { replyTo: REPLY_TO } : {}),
+    subject: 'Réinitialisation du mot de passe — MES POCHES',
+    html: `
+      <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
+        <h1 style="color: #0ea5e9; font-size: 24px;">MES POCHES</h1>
+        <p>Vous avez demandé à définir ou réinitialiser votre mot de passe. Utilisez ce code :</p>
+        <div style="background: #f0f9ff; border-radius: 12px; padding: 24px; text-align: center; margin: 24px 0;">
+          <span style="font-size: 36px; font-weight: bold; letter-spacing: 8px; color: #0369a1;">${escapeHtml(code)}</span>
+        </div>
+        <p style="color: #6b7280; font-size: 14px;">Ce code expire dans 15 minutes. Si vous n'avez pas fait cette demande, ignorez cet email.</p>
+      </div>
+    `,
+  });
+
+  if (error) {
+    console.error('Erreur Resend reset:', error);
+    throw new Error("Impossible d'envoyer l'email de réinitialisation");
+  }
+}
+
 interface PlannedExpenseReminderRow {
   amount: number;
   description: string;

@@ -1,5 +1,5 @@
 import { IUser } from '../models/User';
-import { sendVerificationEmail } from './email';
+import { sendPasswordResetEmail, sendVerificationEmail } from './email';
 import {
   generateSecureOtp,
   hashOtp,
@@ -20,6 +20,18 @@ export async function setVerificationCode(user: IUser): Promise<void> {
   user.verificationAttempts = 0;
   await user.save();
   await sendVerificationEmail(user.email, code);
+}
+
+export async function setPasswordResetCode(user: IUser): Promise<void> {
+  const code = generateSecureOtp();
+  user.verificationCode = hashOtp(code);
+  user.verificationCodeExpires = new Date(
+    Date.now() + CODE_EXPIRY_MINUTES * 60 * 1000
+  );
+  user.lastVerificationSentAt = new Date();
+  user.verificationAttempts = 0;
+  await user.save();
+  await sendPasswordResetEmail(user.email, code);
 }
 
 export async function verifyCode(
