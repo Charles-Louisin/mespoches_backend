@@ -62,15 +62,32 @@ export async function executeDuePlannedExpenses(): Promise<{
   const due = await PlannedExpense.find({
     status: 'scheduled',
     scheduled_date: { $gte: today, $lt: tomorrow },
+    execution_claimed_at: null,
   }).sort({ created_at: 1 });
 
   let executed = 0;
   let cancelled = 0;
 
   for (const planned of due) {
-    const result = await executePlannedExpense(planned);
-    if (result === 'executed') executed++;
-    else cancelled++;
+    const claimed = await PlannedExpense.findOneAndUpdate(
+      {
+        _id: planned._id,
+        status: 'scheduled',
+        execution_claimed_at: null,
+      },
+      { $set: { execution_claimed_at: new Date() } },
+      { new: true }
+    );
+    if (!claimed) continue;
+    try {
+      const result = await executePlannedExpense(claimed);
+      if (result === 'executed') executed++;
+      else cancelled++;
+    } catch (err) {
+      claimed.execution_claimed_at = null;
+      await claimed.save();
+      console.error('Exécution dépense prévue:', err);
+    }
   }
 
   return { executed, cancelled };

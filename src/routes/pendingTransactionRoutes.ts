@@ -256,10 +256,10 @@ router.post('/parse-sms', parseIngestLimiter, async (req: Request, res: Response
     }
 
     res.status(201).json({ success: true, data: created.item, duplicate: false });
-  } catch (e) {
+  } catch {
     res.status(500).json({
       success: false,
-      message: e instanceof Error ? e.message : 'Erreur serveur',
+      message: 'Erreur lors de l’analyse du SMS',
     });
   }
 });
@@ -296,10 +296,10 @@ router.post('/parse-notification', parseIngestLimiter, async (req: Request, res:
     }
 
     res.status(201).json({ success: true, data: created.item, duplicate: false });
-  } catch (e) {
+  } catch {
     res.status(500).json({
       success: false,
-      message: e instanceof Error ? e.message : 'Erreur serveur',
+      message: 'Erreur lors de l’analyse de la notification',
     });
   }
 });

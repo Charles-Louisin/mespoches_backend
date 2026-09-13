@@ -15,6 +15,7 @@ export interface IPlannedExpense extends Document {
   cancelled_reason: PlannedExpenseCancelledReason | null;
   executed_transaction_id: Types.ObjectId | null;
   reminder_sent_at: Date | null;
+  execution_claimed_at: Date | null;
   created_at: Date;
 }
 
@@ -69,6 +70,10 @@ const plannedExpenseSchema = new Schema<IPlannedExpense>(
       default: null,
     },
     reminder_sent_at: {
+      type: Date,
+      default: null,
+    },
+    execution_claimed_at: {
       type: Date,
       default: null,
     },

@@ -181,7 +181,8 @@ router.get('/:id/history', protect, async (req: Request, res: Response) => {
       .populate('wallet_id')
       .populate('destination_wallet_id')
       .populate('category_id')
-      .sort({ date: -1 });
+      .sort({ date: -1 })
+      .limit(300);
 
     const planned_expenses = await PlannedExpense.find({
       user_id: req.user!._id,

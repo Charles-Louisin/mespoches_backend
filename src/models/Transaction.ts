@@ -114,6 +114,7 @@ const transactionSchema = new Schema<ITransaction>(
 
 transactionSchema.index({ user_id: 1, wallet_id: 1, date: -1 });
 transactionSchema.index({ user_id: 1, date: -1 });
+transactionSchema.index({ user_id: 1, type: 1, category_id: 1, date: -1 });
 
 const Transaction: Model<ITransaction> =
   mongoose.models.Transaction ||

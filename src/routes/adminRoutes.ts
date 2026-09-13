@@ -8,7 +8,11 @@ const router = Router();
 
 router.get('/users', protect, adminOnly, async (_req: Request, res: Response) => {
   try {
-    const users = await User.find().select('-password').lean();
+    const users = await User.find()
+      .select('-password')
+      .sort({ lastLoginAt: -1, created_at: -1 })
+      .limit(500)
+      .lean();
 
     const userIds = users.map((u) => u._id);
 

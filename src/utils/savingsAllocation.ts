@@ -3,6 +3,7 @@ import SavingsGoal from '../models/SavingsGoal';
 import Wallet from '../models/Wallet';
 import Transaction, { ITransaction } from '../models/Transaction';
 import { resolveOwnedCategoryId } from './ownership';
+import { debitWallet } from '../services/walletTransaction';
 
 interface AllocateInput {
   userId: Types.ObjectId;
@@ -34,22 +35,10 @@ export async function allocateToSavingsGoal(
     if (!input.wallet_id) {
       throw new Error('Poche requise pour alimenter l\'épargne');
     }
-    const wallet = await Wallet.findOne({
-      _id: input.wallet_id,
-      user_id: input.userId,
-      is_deleted: { $ne: true },
-    });
-    if (!wallet) {
-      throw new Error('Portefeuille introuvable');
-    }
+    const wallet = await debitWallet(input.userId, input.wallet_id, input.amount);
     walletId = wallet._id;
-    balance_before = wallet.current_balance;
-    balance_after = balance_before - input.amount;
-    if (balance_after < 0) {
-      throw new Error('Solde insuffisant pour cette épargne');
-    }
-    wallet.current_balance = balance_after;
-    await wallet.save();
+    balance_after = wallet.current_balance;
+    balance_before = balance_after + input.amount;
   } else if (input.wallet_id) {
     const wallet = await Wallet.findOne({
       _id: input.wallet_id,

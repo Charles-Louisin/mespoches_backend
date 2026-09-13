@@ -3,7 +3,7 @@ import { Request, Response } from 'express';
 
 /**
  * Protège les endpoints d'info ops (IP CinetPay, checklist).
- * En production : exige CINETPAY_SETUP_SECRET (header X-Setup-Secret ou ?secret=).
+ * En production : exige CINETPAY_SETUP_SECRET via le header X-Setup-Secret.
  * En développement : ouvert si le secret n'est pas défini.
  */
 export function assertSetupAccess(req: Request, res: Response): boolean {
@@ -22,9 +22,7 @@ export function assertSetupAccess(req: Request, res: Response): boolean {
     return true;
   }
 
-  const provided = String(
-    req.headers['x-setup-secret'] || req.query.secret || ''
-  ).trim();
+  const provided = String(req.headers['x-setup-secret'] || '').trim();
 
   if (!provided || provided.length !== secret.length) {
     res.status(403).json({ success: false, message: 'Accès refusé' });

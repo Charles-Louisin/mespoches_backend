@@ -31,28 +31,42 @@ router.get('/', async (req: Request, res: Response) => {
     const start = new Date(year, month - 1, 1);
     const end = new Date(year, month, 0, 23, 59, 59);
 
-    const enriched = await Promise.all(
-      budgets.map(async (b) => {
-        const catId = b.category_id;
-        const spent = await Transaction.aggregate([
+    const categoryIds = budgets
+      .map((b) => {
+        const cat = b.category_id as { _id?: unknown } | unknown;
+        return (cat as { _id?: unknown })?._id ?? cat;
+      })
+      .filter(Boolean);
+
+    const spentByCategory = categoryIds.length
+      ? await Transaction.aggregate([
           {
             $match: {
               user_id: req.user!._id,
               type: 'expense',
-              category_id: catId,
+              category_id: { $in: categoryIds },
               date: { $gte: start, $lte: end },
             },
           },
-          { $group: { _id: null, total: { $sum: '$amount' } } },
-        ]);
-        const spentAmount = spent[0]?.total ?? 0;
-        return {
-          ...b.toObject(),
-          spent: spentAmount,
-          percent: b.limit_amount > 0 ? (spentAmount / b.limit_amount) * 100 : 0,
-        };
-      })
-    );
+          { $group: { _id: '$category_id', total: { $sum: '$amount' } } },
+        ])
+      : [];
+
+    const spentMap = new Map<string, number>();
+    for (const row of spentByCategory) {
+      spentMap.set(String(row._id), row.total ?? 0);
+    }
+
+    const enriched = budgets.map((b) => {
+      const catId = b.category_id as { _id?: unknown } | unknown;
+      const key = String((catId as { _id?: unknown })?._id ?? catId);
+      const spentAmount = spentMap.get(key) ?? 0;
+      return {
+        ...b.toObject(),
+        spent: spentAmount,
+        percent: b.limit_amount > 0 ? (spentAmount / b.limit_amount) * 100 : 0,
+      };
+    });
 
     return res.json({ success: true, count: enriched.length, data: enriched });
   } catch (error) {

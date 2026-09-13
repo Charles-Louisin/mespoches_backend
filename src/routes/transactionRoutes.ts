@@ -9,6 +9,8 @@ import { isPremiumUser, getFreeHistoryStartDate } from '../utils/subscription';
 import { allocateToSavingsGoal } from '../utils/savingsAllocation';
 import { isFutureUtcDay } from '../utils/plannedExpenseDates';
 import { resolveOwnedCategoryId } from '../utils/ownership';
+import { debitWallet, creditWallet } from '../services/walletTransaction';
+import { parseListLimit } from '../utils/jobLock';
 
 const router = Router();
 
@@ -99,18 +101,6 @@ async function createTransactionAndUpdateWallet({
     throw new Error('Montant invalide');
   }
 
-  const balance_before = wallet.current_balance;
-  let balance_after = balance_before;
-
-  if (type === 'income') {
-    balance_after = balance_before + amount;
-  } else if (type === 'expense') {
-    balance_after = balance_before - amount;
-    if (balance_after < 0) {
-      throw new Error('Solde insuffisant pour cette dépense');
-    }
-  }
-
   const categoryId = await resolveOwnedCategoryId(userId, data.category_id);
 
   const description =
@@ -119,23 +109,42 @@ async function createTransactionAndUpdateWallet({
       ? `${lineItems.length} articles`
       : lineItems[0]?.description || '');
 
-  const transaction = await Transaction.create({
-    user_id: userId,
-    type,
-    amount,
-    wallet_id: data.wallet_id,
-    category_id: categoryId,
-    description,
-    line_items: lineItems,
-    date: data.date || new Date(),
-    balance_before,
-    balance_after,
-  });
+  let updatedWallet = wallet;
+  if (type === 'income') {
+    updatedWallet = await creditWallet(userId, data.wallet_id, amount);
+  } else if (type === 'expense') {
+    updatedWallet = await debitWallet(userId, data.wallet_id, amount);
+  }
 
-  wallet.current_balance = balance_after;
-  await wallet.save();
+  const balance_after = updatedWallet.current_balance;
+  const balance_before =
+    type === 'income'
+      ? balance_after - amount
+      : type === 'expense'
+        ? balance_after + amount
+        : wallet.current_balance;
 
-  return transaction;
+  try {
+    return await Transaction.create({
+      user_id: userId,
+      type,
+      amount,
+      wallet_id: data.wallet_id,
+      category_id: categoryId,
+      description,
+      line_items: lineItems,
+      date: data.date || new Date(),
+      balance_before,
+      balance_after,
+    });
+  } catch (err) {
+    if (type === 'income') {
+      await debitWallet(userId, data.wallet_id, amount);
+    } else if (type === 'expense') {
+      await creditWallet(userId, data.wallet_id, amount);
+    }
+    throw err;
+  }
 }
 
 async function reverseSimpleTransaction(
@@ -291,6 +300,8 @@ router.get('/', protect, async (req: Request, res: Response) => {
       }
     }
 
+    const limit = parseListLimit(req.query.limit, 200, 500);
+
     const transactions = await Transaction.find({
       ...query,
       $or: [
@@ -302,7 +313,8 @@ router.get('/', protect, async (req: Request, res: Response) => {
       .populate('destination_wallet_id')
       .populate('category_id')
       .populate('savings_goal_id')
-      .sort({ date: -1 });
+      .sort({ date: -1 })
+      .limit(limit);
 
     const seenTransferKeys = new Set<string>();
     const filtered: ITransaction[] = [];
@@ -603,77 +615,82 @@ router.post('/transfer', protect, async (req: Request, res: Response) => {
       });
     }
 
-    const sourceWallet = await Wallet.findOne({
-      _id: value.wallet_id,
-      user_id: req.user!._id,
-      is_deleted: { $ne: true },
-    });
-    const destWallet = await Wallet.findOne({
-      _id: value.destination_wallet_id,
-      user_id: req.user!._id,
-      is_deleted: { $ne: true },
-    });
-
-    if (!sourceWallet || !destWallet) {
-      return res.status(404).json({
-        success: false,
-        message: 'Portefeuille introuvable',
-      });
-    }
-
-    if (String(sourceWallet._id) === String(destWallet._id)) {
+    if (String(value.wallet_id) === String(value.destination_wallet_id)) {
       return res.status(400).json({
         success: false,
         message: 'Impossible de transférer vers le même portefeuille',
       });
     }
 
-    const source_balance_before = sourceWallet.current_balance;
-    const source_balance_after = source_balance_before - value.amount;
+    let sourceWallet: Awaited<ReturnType<typeof debitWallet>> | undefined;
+    let destWallet: Awaited<ReturnType<typeof creditWallet>> | undefined;
+    try {
+      sourceWallet = await debitWallet(req.user!._id, value.wallet_id, value.amount);
+      destWallet = await creditWallet(
+        req.user!._id,
+        value.destination_wallet_id,
+        value.amount
+      );
+    } catch (err) {
+      if (sourceWallet && !destWallet) {
+        await creditWallet(req.user!._id, value.wallet_id, value.amount);
+      }
+      const message =
+        err instanceof Error ? err.message : 'Erreur lors du transfert';
+      return res.status(400).json({ success: false, message });
+    }
 
-    if (source_balance_after < 0) {
+    if (!sourceWallet || !destWallet) {
       return res.status(400).json({
         success: false,
-        message: 'Solde insuffisant pour ce transfert',
+        message: 'Portefeuille introuvable',
       });
     }
 
-    const dest_balance_before = destWallet.current_balance;
-    const dest_balance_after = dest_balance_before + value.amount;
+    const source_balance_after = sourceWallet.current_balance;
+    const source_balance_before = source_balance_after + value.amount;
+    const dest_balance_after = destWallet.current_balance;
+    const dest_balance_before = dest_balance_after - value.amount;
     const transferGroupId = new mongoose.Types.ObjectId();
 
-    const debit = await Transaction.create({
-      user_id: req.user!._id,
-      type: 'transfer',
-      amount: value.amount,
-      wallet_id: sourceWallet._id,
-      destination_wallet_id: destWallet._id,
-      transfer_group_id: transferGroupId,
-      is_transfer_mirror: false,
-      description: value.description || `Transfert vers ${destWallet.name}`,
-      date: value.date || new Date(),
-      balance_before: source_balance_before,
-      balance_after: source_balance_after,
-    });
+    let debit: ITransaction | undefined;
+    let credit: ITransaction | undefined;
+    try {
+      debit = await Transaction.create({
+        user_id: req.user!._id,
+        type: 'transfer',
+        amount: value.amount,
+        wallet_id: sourceWallet._id,
+        destination_wallet_id: destWallet._id,
+        transfer_group_id: transferGroupId,
+        is_transfer_mirror: false,
+        description: value.description || `Transfert vers ${destWallet.name}`,
+        date: value.date || new Date(),
+        balance_before: source_balance_before,
+        balance_after: source_balance_after,
+      });
 
-    const credit = await Transaction.create({
-      user_id: req.user!._id,
-      type: 'transfer',
-      amount: value.amount,
-      wallet_id: destWallet._id,
-      destination_wallet_id: sourceWallet._id,
-      transfer_group_id: transferGroupId,
-      is_transfer_mirror: true,
-      description: value.description || `Transfert de ${sourceWallet.name}`,
-      date: value.date || new Date(),
-      balance_before: dest_balance_before,
-      balance_after: dest_balance_after,
-    });
-
-    sourceWallet.current_balance = source_balance_after;
-    destWallet.current_balance = dest_balance_after;
-    await sourceWallet.save();
-    await destWallet.save();
+      credit = await Transaction.create({
+        user_id: req.user!._id,
+        type: 'transfer',
+        amount: value.amount,
+        wallet_id: destWallet._id,
+        destination_wallet_id: sourceWallet._id,
+        transfer_group_id: transferGroupId,
+        is_transfer_mirror: true,
+        description: value.description || `Transfert de ${sourceWallet.name}`,
+        date: value.date || new Date(),
+        balance_before: dest_balance_before,
+        balance_after: dest_balance_after,
+      });
+    } catch (err) {
+      if (debit) {
+        await Transaction.deleteOne({ _id: debit._id, user_id: req.user!._id });
+      }
+      await creditWallet(req.user!._id, value.wallet_id, value.amount);
+      await debitWallet(req.user!._id, value.destination_wallet_id, value.amount);
+      throw err;
+    }
 
     const populatedDebit = await Transaction.findById(debit._id)
       .populate('wallet_id')

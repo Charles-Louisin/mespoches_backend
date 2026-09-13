@@ -25,6 +25,8 @@ import {
   isCinetPayConfigured,
 } from './utils/cinetpay';
 import { assertSetupAccess } from './utils/setupAccess';
+import { sanitizeMongoKeys } from './middleware/sanitize';
+import { apiLimiter } from './utils/security';
 
 const app = express();
 
@@ -88,7 +90,15 @@ app.use(
 );
 app.use(express.json({ limit: '8mb' }));
 app.use(express.urlencoded({ extended: true, limit: '8mb' }));
-app.use(morgan(isProduction ? 'combined' : 'dev'));
+app.use(sanitizeMongoKeys);
+app.use(apiLimiter);
+
+app.use(
+  morgan(isProduction ? 'combined' : 'dev', {
+    skip: (req) =>
+      /[?&](notify_token|secret)=/i.test(req.originalUrl || req.url || ''),
+  })
+);
 
 app.get('/api/health', async (req, res) => {
   const mongoState = mongoose.connection.readyState;
@@ -98,9 +108,11 @@ app.get('/api/health', async (req, res) => {
   const payload: Record<string, unknown> = {
     success: true,
     message: 'API MES POCHES opérationnelle',
-    env: NODE_ENV,
     mongodb: mongoStatus,
   };
+  if (!isProduction) {
+    payload.env = NODE_ENV;
+  }
 
   // Détails CinetPay uniquement avec secret ops
   if (req.query.cinetpay === '1' || req.query.cinetpay === 'true') {
@@ -134,6 +146,22 @@ app.use('/api/subscription', subscriptionRoutes);
 app.use('/api/webhooks', webhookRoutes);
 app.use('/api/planned-expenses', plannedExpenseRoutes);
 app.use('/api/pending-transactions', pendingTransactionRoutes);
+
+app.use(
+  (
+    err: unknown,
+    _req: express.Request,
+    res: express.Response,
+    _next: express.NextFunction
+  ) => {
+    console.error('Erreur non gérée:', err instanceof Error ? err.message : err);
+    if (res.headersSent) return;
+    res.status(500).json({
+      success: false,
+      message: 'Erreur serveur',
+    });
+  }
+);
 
 function logStartupBanner(mongoOk: boolean): void {
   const line = '─'.repeat(42);
@@ -191,7 +219,11 @@ async function connectMongo(): Promise<void> {
   console.log(`\n⏳ Connexion MongoDB (${NODE_ENV})...`);
 
   try {
-    await mongoose.connect(MONGODB_URI!);
+    await mongoose.connect(MONGODB_URI!, {
+      maxPoolSize: 20,
+      minPoolSize: 2,
+      serverSelectionTimeoutMS: 10_000,
+    });
     console.log('✅ MongoDB connecté avec succès');
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

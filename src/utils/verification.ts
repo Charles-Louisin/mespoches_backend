@@ -1,4 +1,3 @@
-import crypto from 'crypto';
 import { IUser } from '../models/User';
 import { sendVerificationEmail } from './email';
 import {
@@ -6,17 +5,6 @@ import {
   hashOtp,
   timingSafeEqualHex,
 } from './security';
-
-function timingSafeEqualUtf8(a: string, b: string): boolean {
-  try {
-    const ba = Buffer.from(a);
-    const bb = Buffer.from(b);
-    if (ba.length !== bb.length) return false;
-    return crypto.timingSafeEqual(ba, bb);
-  } catch {
-    return false;
-  }
-}
 
 export const CODE_EXPIRY_MINUTES = 15;
 export const RESEND_COOLDOWN_MS = 60_000;
@@ -50,12 +38,7 @@ export async function verifyCode(
 
   const candidate = hashOtp(code);
   const stored = String(user.verificationCode);
-  // Codes historiques en clair (avant hash HMAC) — compat temporaire
-  const match =
-    timingSafeEqualHex(candidate, stored) ||
-    (stored.length === 6 &&
-      /^\d{6}$/.test(stored) &&
-      timingSafeEqualUtf8(stored, code.trim()));
+  const match = timingSafeEqualHex(candidate, stored);
 
   if (!match) {
     user.verificationAttempts = (user.verificationAttempts ?? 0) + 1;

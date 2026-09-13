@@ -525,6 +525,244 @@ function isValidHandoffCode(code: string): boolean {
   return /^[A-Za-z0-9_-]{32,128}$/.test(code);
 }
 
+function googleClientId(): string {
+  return process.env.GOOGLE_CLIENT_ID?.trim() || '';
+}
+
+function googleClientSecret(): string {
+  return process.env.GOOGLE_CLIENT_SECRET?.trim() || '';
+}
+
+function isAllowedOAuthRedirectUri(uri: string): boolean {
+  try {
+    const parsed = new URL(uri);
+    if (parsed.pathname !== '/api/auth/google/callback') return false;
+    const allowed = new Set(
+      [
+        ...(process.env.CORS_ORIGIN || '').split(','),
+        process.env.APP_URL,
+        'https://mespoches.vercel.app',
+      ]
+        .map((o) => o?.trim().replace(/\/$/, ''))
+        .filter(Boolean)
+    );
+    if (allowed.has(parsed.origin)) return true;
+    if (parsed.hostname.endsWith('.vercel.app')) return true;
+    if (process.env.NODE_ENV !== 'production') {
+      return /^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(parsed.hostname);
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+async function completeGoogleLogin(
+  req: Request,
+  value: { idToken: string; mobile: boolean; clientNonce?: string }
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const clientId = googleClientId();
+  if (!clientId) {
+    return {
+      status: 500,
+      body: {
+        success: false,
+        message: 'GOOGLE_CLIENT_ID non configuré sur le serveur',
+      },
+    };
+  }
+
+  const { OAuth2Client } = await import('google-auth-library');
+  const client = new OAuth2Client(clientId);
+  const ticket = await client.verifyIdToken({
+    idToken: value.idToken,
+    audience: clientId,
+  });
+  const payload = ticket.getPayload();
+  if (!payload?.sub || !payload.email) {
+    return {
+      status: 401,
+      body: { success: false, message: 'Compte Google invalide' },
+    };
+  }
+
+  if (payload.email_verified === false) {
+    return {
+      status: 403,
+      body: { success: false, message: 'Email Google non vérifié' },
+    };
+  }
+
+  const googleId = payload.sub;
+  const email = payload.email.toLowerCase().trim();
+  const name = (payload.name || payload.given_name || '').trim();
+
+  let user = await User.findOne({ googleId });
+
+  if (!user) {
+    const byEmail = await User.findOne({ email }).select('+password');
+    if (byEmail) {
+      byEmail.googleId = googleId;
+      byEmail.authProvider = 'google';
+      byEmail.emailVerified = true;
+      byEmail.password = undefined;
+      byEmail.set('password', undefined);
+      byEmail.verificationCode = null;
+      byEmail.verificationCodeExpires = null;
+      await revokeAllSessions(byEmail);
+      if (name && !byEmail.name) byEmail.name = name;
+      user = byEmail;
+    } else {
+      user = new User({
+        email,
+        name: name || undefined,
+        googleId,
+        authProvider: 'google',
+        emailVerified: true,
+        ...getNewUserTrialFields(),
+      });
+    }
+  } else {
+    if (!user.emailVerified) {
+      user.emailVerified = true;
+      user.verificationCode = null;
+      user.verificationCodeExpires = null;
+    }
+    if (name && !user.name) {
+      user.name = name;
+    }
+  }
+
+  recordLogin(user, req);
+  await user.save();
+  await syncExpiredPremium(user);
+
+  if (user.authProvider === 'google' && user.password === undefined) {
+    await User.updateOne({ _id: user._id }, { $unset: { password: 1 } });
+  }
+
+  const token = generateToken(user);
+
+  if (value.mobile) {
+    if (!value.clientNonce) {
+      return {
+        status: 400,
+        body: { success: false, message: 'Nonce mobile manquant' },
+      };
+    }
+    const handoffCode = crypto.randomBytes(32).toString('base64url');
+    await AuthHandoff.create({
+      codeHash: hashHandoffCode(handoffCode),
+      clientNonceHash: hashHandoffCode(value.clientNonce),
+      token,
+      emailVerified: true,
+      expiresAt: new Date(Date.now() + 5 * 60 * 1000),
+    });
+    return { status: 200, body: { success: true, data: { handoffCode } } };
+  }
+
+  return {
+    status: 200,
+    body: {
+      success: true,
+      data: {
+        user: toPublicUser(user),
+        token,
+      },
+    },
+  };
+}
+
+/** Client ID public — le front Vercel n’a pas besoin de recopier le secret. */
+router.get('/google/client', async (_req: Request, res: Response) => {
+  const clientId = googleClientId();
+  if (!clientId) {
+    return res.status(503).json({
+      success: false,
+      message: 'GOOGLE_CLIENT_ID non configuré sur le serveur',
+    });
+  }
+  return res.json({ success: true, data: { clientId } });
+});
+
+const exchangeSchema = Joi.object({
+  code: Joi.string().required(),
+  redirectUri: Joi.string().uri().required(),
+  mobile: Joi.boolean().default(false),
+  clientNonce: Joi.string().min(32).max(128).when('mobile', {
+    is: true,
+    then: Joi.required(),
+    otherwise: Joi.optional(),
+  }),
+});
+
+/** Échange le code OAuth (Vercel) contre une session — secret uniquement ici. */
+router.post('/google/exchange', loginLimiter, async (req: Request, res: Response) => {
+  try {
+    const { error, value } = exchangeSchema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: 'Code Google invalide',
+      });
+    }
+
+    const clientId = googleClientId();
+    const clientSecret = googleClientSecret();
+    if (!clientId || !clientSecret) {
+      return res.status(500).json({
+        success: false,
+        message: 'GOOGLE_CLIENT_ID / SECRET non configurés sur le serveur',
+      });
+    }
+
+    if (!isAllowedOAuthRedirectUri(value.redirectUri)) {
+      return res.status(400).json({
+        success: false,
+        message: 'redirect_uri Google non autorisé',
+      });
+    }
+
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code: value.code,
+        client_id: clientId,
+        client_secret: clientSecret,
+        redirect_uri: value.redirectUri,
+        grant_type: 'authorization_code',
+      }),
+    });
+
+    const tokenData = (await tokenRes.json()) as {
+      id_token?: string;
+      error?: string;
+    };
+
+    if (!tokenRes.ok || !tokenData.id_token) {
+      console.error('Google token exchange failed:', tokenData.error);
+      return res.status(401).json({
+        success: false,
+        message: 'Échange Google impossible. Réessayez.',
+      });
+    }
+
+    const result = await completeGoogleLogin(req, {
+      idToken: tokenData.id_token,
+      mobile: value.mobile,
+      clientNonce: value.clientNonce,
+    });
+    return res.status(result.status).json(result.body);
+  } catch (err) {
+    console.error('Erreur Google exchange:', err);
+    return res.status(401).json({
+      success: false,
+      message: 'Connexion Google impossible',
+    });
+  }
+});
+
 router.post('/google', loginLimiter, async (req: Request, res: Response) => {
   try {
     const { error, value } = googleSchema.validate(req.body);
@@ -535,124 +773,8 @@ router.post('/google', loginLimiter, async (req: Request, res: Response) => {
       });
     }
 
-    const clientId = process.env.GOOGLE_CLIENT_ID?.trim();
-    if (!clientId) {
-      return res.status(500).json({
-        success: false,
-        message: 'GOOGLE_CLIENT_ID non configuré sur le serveur',
-      });
-    }
-
-    const { OAuth2Client } = await import('google-auth-library');
-    const client = new OAuth2Client(clientId);
-    const ticket = await client.verifyIdToken({
-      idToken: value.idToken,
-      audience: clientId,
-    });
-    const payload = ticket.getPayload();
-    if (!payload?.sub || !payload.email) {
-      return res.status(401).json({
-        success: false,
-        message: 'Compte Google invalide',
-      });
-    }
-
-    if (payload.email_verified === false) {
-      return res.status(403).json({
-        success: false,
-        message: 'Email Google non vérifié',
-      });
-    }
-
-    const googleId = payload.sub;
-    const email = payload.email.toLowerCase().trim();
-    const name = (payload.name || payload.given_name || '').trim();
-
-    let user = await User.findOne({ googleId });
-
-    if (!user) {
-      const byEmail = await User.findOne({ email }).select('+password');
-      if (byEmail) {
-        // Empêche la prise de compte : un email non vérifié ne peut pas être
-        // fusionné avec Google (sinon l'attaquant garde le mot de passe).
-        if (!byEmail.emailVerified) {
-          await User.deleteOne({ _id: byEmail._id });
-          user = new User({
-            email,
-            name: name || undefined,
-            googleId,
-            authProvider: 'google',
-            emailVerified: true,
-            ...getNewUserTrialFields(),
-          });
-        } else {
-          // Compte email vérifié : liaison Google + invalidation du mot de passe
-          // pour éviter un double accès après compromission / phishing.
-          byEmail.googleId = googleId;
-          byEmail.authProvider = 'google';
-          byEmail.password = undefined;
-          byEmail.set('password', undefined);
-          byEmail.verificationCode = null;
-          byEmail.verificationCodeExpires = null;
-          await revokeAllSessions(byEmail);
-          if (name && !byEmail.name) byEmail.name = name;
-          user = byEmail;
-        }
-      } else {
-        user = new User({
-          email,
-          name: name || undefined,
-          googleId,
-          authProvider: 'google',
-          emailVerified: true,
-          ...getNewUserTrialFields(),
-        });
-      }
-    } else {
-      if (!user.emailVerified) {
-        user.emailVerified = true;
-        user.verificationCode = null;
-        user.verificationCodeExpires = null;
-      }
-      if (name && !user.name) {
-        user.name = name;
-      }
-    }
-
-    recordLogin(user, req);
-    await user.save();
-    await syncExpiredPremium(user);
-
-    // Après unset password, s'assurer que le champ n'est plus en base
-    if (user.authProvider === 'google' && user.password === undefined) {
-      await User.updateOne({ _id: user._id }, { $unset: { password: 1 } });
-    }
-
-    const token = generateToken(user);
-
-    if (value.mobile) {
-      const handoffCode = crypto.randomBytes(32).toString('base64url');
-      await AuthHandoff.create({
-        codeHash: hashHandoffCode(handoffCode),
-        clientNonceHash: hashHandoffCode(value.clientNonce),
-        token,
-        emailVerified: true,
-        expiresAt: new Date(Date.now() + 5 * 60 * 1000),
-      });
-
-      return res.status(200).json({
-        success: true,
-        data: { handoffCode },
-      });
-    }
-
-    return res.status(200).json({
-      success: true,
-      data: {
-        user: toPublicUser(user),
-        token,
-      },
-    });
+    const result = await completeGoogleLogin(req, value);
+    return res.status(result.status).json(result.body);
   } catch (err) {
     console.error('Erreur Google auth:', err);
     return res.status(401).json({

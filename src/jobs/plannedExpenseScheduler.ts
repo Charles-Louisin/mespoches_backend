@@ -6,6 +6,7 @@ import {
   getUtcDayStart,
 } from '../utils/plannedExpenseDates';
 import { sendPlannedExpensesReminderEmail } from '../utils/email';
+import { acquireJobLock } from '../utils/jobLock';
 
 const REMINDER_HOUR_UTC = Number(process.env.PLANNED_EXPENSE_REMINDER_HOUR_UTC) || 8;
 const EXECUTE_HOUR_UTC = Number(process.env.PLANNED_EXPENSE_EXECUTE_HOUR_UTC) || 0;
@@ -83,11 +84,14 @@ async function runDailyJobs(): Promise<void> {
     lastReminderDateKey !== dateKey
   ) {
     lastReminderDateKey = dateKey;
-    try {
-      await sendTomorrowReminders();
-      console.log('✅ Rappels dépenses prévues (J-1) envoyés');
-    } catch (err) {
-      console.error('❌ Erreur rappels dépenses prévues:', err);
+    const locked = await acquireJobLock(`planned-reminder:${dateKey}`, 20 * 60 * 1000);
+    if (locked) {
+      try {
+        await sendTomorrowReminders();
+        console.log('✅ Rappels dépenses prévues (J-1) envoyés');
+      } catch (err) {
+        console.error('❌ Erreur rappels dépenses prévues:', err);
+      }
     }
   }
 
@@ -98,6 +102,8 @@ async function runDailyJobs(): Promise<void> {
     lastExecuteDateKey !== dateKey
   ) {
     lastExecuteDateKey = dateKey;
+    const locked = await acquireJobLock(`planned-execute:${dateKey}`, 20 * 60 * 1000);
+    if (!locked) return;
     try {
       const result = await executeDuePlannedExpenses();
       console.log(

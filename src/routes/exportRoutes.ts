@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import Transaction from '../models/Transaction';
 import { protect, premiumOnly } from '../middleware/auth';
+import { exportLimiter } from '../utils/security';
 import {
   buildSingleTransactionCsv,
   buildTransactionsCsv,
@@ -15,6 +16,7 @@ const XLSX_MIME =
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
 const router = Router();
+const EXPORT_MAX_ROWS = 2000;
 
 const listQuery = {
   $or: [
@@ -44,7 +46,7 @@ async function getUserTransaction(
     .populate('category_id');
 }
 
-router.get('/transactions', protect, premiumOnly, async (req: Request, res: Response) => {
+router.get('/transactions', protect, premiumOnly, exportLimiter, async (req: Request, res: Response) => {
   try {
     const format = (req.query.format as string) || 'csv';
 
@@ -55,7 +57,8 @@ router.get('/transactions', protect, premiumOnly, async (req: Request, res: Resp
       .populate('wallet_id')
       .populate('destination_wallet_id')
       .populate('category_id')
-      .sort({ date: -1 });
+      .sort({ date: -1 })
+      .limit(EXPORT_MAX_ROWS);
 
     const rows = transactions as unknown as PopulatedTransactionLike[];
     const stamp = Date.now();
@@ -91,7 +94,7 @@ router.get('/transactions', protect, premiumOnly, async (req: Request, res: Resp
   }
 });
 
-router.get('/transactions/:id', protect, premiumOnly, async (req: Request, res: Response) => {
+router.get('/transactions/:id', protect, premiumOnly, exportLimiter, async (req: Request, res: Response) => {
   try {
     const format = (req.query.format as string) || 'csv';
     const transaction = await getUserTransaction(req.user!._id, req.params.id);

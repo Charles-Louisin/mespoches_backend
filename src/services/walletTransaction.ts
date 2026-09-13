@@ -10,6 +10,47 @@ export interface ExpenseInput {
   date?: Date;
 }
 
+export async function debitWallet(
+  userId: Types.ObjectId,
+  walletId: string | Types.ObjectId,
+  amount: number
+) {
+  const updated = await Wallet.findOneAndUpdate(
+    {
+      _id: walletId,
+      user_id: userId,
+      is_deleted: { $ne: true },
+      current_balance: { $gte: amount },
+    },
+    { $inc: { current_balance: -amount } },
+    { new: true }
+  );
+  if (!updated) {
+    throw new Error('Solde insuffisant ou portefeuille introuvable');
+  }
+  return updated;
+}
+
+export async function creditWallet(
+  userId: Types.ObjectId,
+  walletId: string | Types.ObjectId,
+  amount: number
+) {
+  const updated = await Wallet.findOneAndUpdate(
+    {
+      _id: walletId,
+      user_id: userId,
+      is_deleted: { $ne: true },
+    },
+    { $inc: { current_balance: amount } },
+    { new: true }
+  );
+  if (!updated) {
+    throw new Error('Portefeuille introuvable');
+  }
+  return updated;
+}
+
 /** Crée une dépense immédiate et met à jour le solde de la poche. */
 export async function createExpenseTransaction({
   userId,
@@ -18,37 +59,24 @@ export async function createExpenseTransaction({
   userId: Types.ObjectId;
   data: ExpenseInput;
 }): Promise<ITransaction> {
-  const wallet = await Wallet.findOne({
-    _id: data.wallet_id,
-    user_id: userId,
-    is_deleted: { $ne: true },
-  });
+  const wallet = await debitWallet(userId, data.wallet_id, data.amount);
+  const balance_after = wallet.current_balance;
+  const balance_before = balance_after + data.amount;
 
-  if (!wallet) {
-    throw new Error('Portefeuille introuvable');
+  try {
+    return await Transaction.create({
+      user_id: userId,
+      type: 'expense',
+      amount: data.amount,
+      wallet_id: data.wallet_id,
+      category_id: data.category_id || null,
+      description: data.description || '',
+      date: data.date || new Date(),
+      balance_before,
+      balance_after,
+    });
+  } catch (err) {
+    await creditWallet(userId, data.wallet_id, data.amount);
+    throw err;
   }
-
-  const balance_before = wallet.current_balance;
-  const balance_after = balance_before - data.amount;
-
-  if (balance_after < 0) {
-    throw new Error('Solde insuffisant pour cette dépense');
-  }
-
-  const transaction = await Transaction.create({
-    user_id: userId,
-    type: 'expense',
-    amount: data.amount,
-    wallet_id: data.wallet_id,
-    category_id: data.category_id || null,
-    description: data.description || '',
-    date: data.date || new Date(),
-    balance_before,
-    balance_after,
-  });
-
-  wallet.current_balance = balance_after;
-  await wallet.save();
-
-  return transaction;
 }

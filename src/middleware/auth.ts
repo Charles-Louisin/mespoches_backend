@@ -62,8 +62,7 @@ export async function protect(
       req.user = user as IUser;
       next();
       return;
-    } catch (error) {
-      console.error('Erreur auth:', error);
+    } catch {
       res.status(401).json({
         success: false,
         message: 'Non autorisé, token invalide',

@@ -95,11 +95,50 @@ export const aiScanLimiter = rateLimit({
   },
 });
 
+export const apiLimiter = rateLimit({
+  ...rateLimitBase,
+  windowMs: 15 * 60 * 1000,
+  max: 400,
+  keyGenerator: (req) => `api:${clientIp(req)}`,
+  skip: (req) =>
+    req.path === '/api/health' ||
+    req.path.startsWith('/api/webhooks') ||
+    req.path.startsWith('/webhooks'),
+  message: {
+    success: false,
+    code: 'RATE_LIMITED',
+    message: 'Trop de requêtes. Réessayez dans quelques minutes.',
+  },
+});
+
+export const exportLimiter = rateLimit({
+  ...rateLimitBase,
+  windowMs: 15 * 60 * 1000,
+  max: 8,
+  keyGenerator: (req) => {
+    const uid = req.user?._id ? String(req.user._id) : clientIp(req);
+    return `export:${uid}`;
+  },
+  message: {
+    success: false,
+    code: 'RATE_LIMITED',
+    message: 'Trop d’exports. Réessayez dans 15 minutes.',
+  },
+});
+
+export const webhookLimiter = rateLimit({
+  ...rateLimitBase,
+  windowMs: 60 * 1000,
+  max: 60,
+  keyGenerator: (req) => `webhook:${clientIp(req)}`,
+  message: { received: false, error: 'rate_limited' },
+});
+
 /** Parse SMS / notifications Mobile Money (coût IA + spam). */
 export const parseIngestLimiter = rateLimit({
   ...rateLimitBase,
   windowMs: 60 * 60 * 1000,
-  max: 120,
+  max: 60,
   keyGenerator: (req) => {
     const uid = req.user?._id ? String(req.user._id) : clientIp(req);
     return `parse-ingest:${uid}`;

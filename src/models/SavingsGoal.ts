@@ -25,6 +25,8 @@ const savingsGoalSchema = new Schema<ISavingsGoal>(
   { timestamps: true }
 );
 
+savingsGoalSchema.index({ user_id: 1 });
+
 const SavingsGoal: Model<ISavingsGoal> =
   mongoose.models.SavingsGoal ||
   mongoose.model<ISavingsGoal>('SavingsGoal', savingsGoalSchema);

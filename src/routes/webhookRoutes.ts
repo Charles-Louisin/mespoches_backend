@@ -3,8 +3,10 @@ import crypto from 'crypto';
 import SubscriptionPayment from '../models/SubscriptionPayment';
 import { processCinetPayTransaction } from '../utils/premiumPayment';
 import { isCinetPayConfigured } from '../utils/cinetpay';
+import { webhookLimiter } from '../utils/security';
 
 const router = Router();
+router.use(webhookLimiter);
 
 interface CinetPayNotifyBody {
   notify_token?: string;

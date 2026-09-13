@@ -69,6 +69,8 @@ const recurringSchema = new Schema<IRecurringTransaction>(
   { timestamps: true }
 );
 
+recurringSchema.index({ user_id: 1, status: 1 });
+
 const RecurringTransaction: Model<IRecurringTransaction> =
   mongoose.models.RecurringTransaction ||
   mongoose.model<IRecurringTransaction>(
