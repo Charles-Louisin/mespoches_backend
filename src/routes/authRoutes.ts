@@ -536,24 +536,23 @@ function googleClientSecret(): string {
 function isAllowedOAuthRedirectUri(uri: string): boolean {
   try {
     const parsed = new URL(uri);
-    if (parsed.pathname !== '/api/auth/google/callback') return false;
+    const path = parsed.pathname.replace(/\/$/, '');
+    if (path !== '/api/auth/google/callback') return false;
+    const host = parsed.hostname.toLowerCase();
+    if (/^(localhost|127\.0\.0\.1)$/i.test(host)) return true;
+    if (parsed.protocol !== 'https:') return false;
+    // Google valide déjà l’URI dans sa console — on accepte nos domaines connus.
+    if (host === 'mespoches.store' || host.endsWith('.mespoches.store')) return true;
+    if (host === 'mespoches.vercel.app' || host.endsWith('.vercel.app')) return true;
     const allowed = new Set(
       [
         ...(process.env.CORS_ORIGIN || '').split(','),
         process.env.APP_URL,
-        'https://mespoches.vercel.app',
-        'https://mespoches.store',
-        'https://www.mespoches.store',
       ]
         .map((o) => o?.trim().replace(/\/$/, ''))
         .filter(Boolean)
     );
-    if (allowed.has(parsed.origin)) return true;
-    if (parsed.hostname.endsWith('.vercel.app')) return true;
-    if (process.env.NODE_ENV !== 'production') {
-      return /^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(parsed.hostname);
-    }
-    return false;
+    return allowed.has(parsed.origin);
   } catch {
     return false;
   }
