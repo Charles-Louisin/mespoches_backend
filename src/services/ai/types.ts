@@ -102,3 +102,12 @@ export type AiCallLog = {
   success: boolean
   error?: string
 }
+
+export type AiMonthBriefing = {
+  headline: string
+  mood: 'good' | 'watch' | 'alert'
+  summary: string
+  highlights: string[]
+  alerts: string[]
+  tips: string[]
+}

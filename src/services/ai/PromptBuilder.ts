@@ -158,6 +158,32 @@ Règles:
 `
   }
 
+  buildMonthBriefingPrompt(snapshot: string): string {
+    return `Tu es le conseiller financier de MES POCHES (Cameroun, XAF/FCFA).
+À partir du snapshot JSON du mois, rédige un briefing court, concret, sans jargon.
+
+Snapshot:
+${snapshot}
+
+Réponds UNIQUEMENT en JSON valide:
+{
+  "headline": "titre court (max 8 mots)",
+  "mood": "good|watch|alert",
+  "summary": "2 ou 3 phrases en français, tutoiement",
+  "highlights": ["point positif 1", "point 2"],
+  "alerts": ["alerte 1 si besoin"],
+  "tips": ["action concrète 1", "action 2"]
+}
+
+Règles:
+- mood good si le solde du mois est positif et les budgets tiennent
+- mood alert si dépassement de budget, épargne en retard, ou dépenses en forte hausse
+- mood watch sinon
+- highlights 0 à 3, alerts 0 à 3, tips 2 à 3
+- Pas de markdown, pas de montants inventés, utilise uniquement le snapshot
+- Ton direct, utile, jamais moralisateur`
+  }
+
   textMessages(prompt: string): OpenRouterChatMessage[] {
     return [{ role: 'user', content: prompt }]
   }

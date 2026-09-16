@@ -9,6 +9,7 @@ import type {
   AiNotificationExtraction,
   AiVoiceExtraction,
   AiVoiceTransaction,
+  AiMonthBriefing,
   OpenRouterChatMessage,
 } from './types'
 
@@ -127,6 +128,31 @@ export class AIService {
     })
 
     return this.normalizeNotificationExtraction(json, model)
+  }
+
+  async analyzeMonthBriefing(snapshot: unknown): Promise<AiMonthBriefing> {
+    const messages = this.prompts.textMessages(
+      this.prompts.buildMonthBriefingPrompt(JSON.stringify(snapshot).slice(0, 6000))
+    )
+    const { json } = await this.completeJson({
+      purpose: 'month_briefing',
+      modality: 'text',
+      messages,
+    })
+    const data = json as Partial<AiMonthBriefing>
+    const mood = data.mood === 'alert' || data.mood === 'watch' || data.mood === 'good' ? data.mood : 'watch'
+    const list = (value: unknown) =>
+      Array.isArray(value)
+        ? value.map((item) => String(item).slice(0, 180)).filter(Boolean).slice(0, 3)
+        : []
+    return {
+      headline: data.headline ? String(data.headline).slice(0, 80) : 'Votre mois en un coup d’œil',
+      mood,
+      summary: data.summary ? String(data.summary).slice(0, 500) : '',
+      highlights: list(data.highlights),
+      alerts: list(data.alerts),
+      tips: list(data.tips),
+    }
   }
 
   async enrichSms(
