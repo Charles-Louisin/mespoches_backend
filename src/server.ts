@@ -18,6 +18,7 @@ import subscriptionRoutes from './routes/subscriptionRoutes';
 import webhookRoutes from './routes/webhookRoutes';
 import plannedExpenseRoutes from './routes/plannedExpenseRoutes';
 import pendingTransactionRoutes from './routes/pendingTransactionRoutes';
+import uploadRoutes from './routes/uploadRoutes';
 import { startPlannedExpenseScheduler } from './jobs/plannedExpenseScheduler';
 import {
   getCinetPayEnvironment,
@@ -75,6 +76,11 @@ function isAllowedCorsOrigin(origin: string): boolean {
       return true;
     }
     if (host === 'mespoches.vercel.app' || host.endsWith('.vercel.app')) {
+      return true;
+    }
+    if (host === 'localhost' || host === '127.0.0.1') return true;
+    if (/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/.test(host)) return true;
+    if (host.endsWith('.exp.direct') || host.endsWith('.expo.dev') || host === 'auth.expo.io') {
       return true;
     }
   } catch {
@@ -161,6 +167,7 @@ app.use('/api/subscription', subscriptionRoutes);
 app.use('/api/webhooks', webhookRoutes);
 app.use('/api/planned-expenses', plannedExpenseRoutes);
 app.use('/api/pending-transactions', pendingTransactionRoutes);
+app.use('/api/upload', uploadRoutes);
 
 app.use(
   (
@@ -197,6 +204,10 @@ function logStartupBanner(mongoOk: boolean): void {
   const googleOk = Boolean(process.env.GOOGLE_CLIENT_ID?.trim());
   console.log(
     `  Google OAuth  : ${googleOk ? '✅ configuré' : '⚠️  GOOGLE_CLIENT_ID manquant'}`
+  );
+  const uploadOk = Boolean(process.env.UPLOADTHING_TOKEN?.trim());
+  console.log(
+    `  UploadThing   : ${uploadOk ? '✅ configuré' : '⚠️  UPLOADTHING_TOKEN manquant'}`
   );
   const cinetpayOk = Boolean(
     (process.env.CINETPAY_ACCOUNT_KEY || process.env.CINETPAY_API_KEY)?.trim() &&

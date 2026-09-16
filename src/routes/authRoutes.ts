@@ -30,6 +30,14 @@ import {
   otpLimiter,
   availabilityLimiter,
 } from '../utils/security';
+import {
+  appendHandoffCode,
+  buildOAuthState,
+  googleCallbackUri,
+  isAllowedAppReturnTo,
+  isValidClientNonce,
+  parseOAuthState,
+} from '../utils/googleOAuth';
 
 const router = Router();
 
@@ -685,15 +693,25 @@ function isAllowedOAuthRedirectUri(uri: string): boolean {
     // Google valide déjà l’URI dans sa console — on accepte nos domaines connus.
     if (host === 'mespoches.store' || host.endsWith('.mespoches.store')) return true;
     if (host === 'mespoches.vercel.app' || host.endsWith('.vercel.app')) return true;
+    if (host.endsWith('.up.railway.app')) return true;
     const allowed = new Set(
       [
         ...(process.env.CORS_ORIGIN || '').split(','),
         process.env.APP_URL,
+        process.env.API_PUBLIC_URL,
       ]
         .map((o) => o?.trim().replace(/\/$/, ''))
-        .filter(Boolean)
+        .filter((o): o is string => Boolean(o))
     );
-    return allowed.has(parsed.origin);
+    if (allowed.has(parsed.origin)) return true;
+    for (const raw of allowed) {
+      try {
+        if (new URL(raw).origin === parsed.origin) return true;
+      } catch {
+        /* ignore */
+      }
+    }
+    return false;
   } catch {
     return false;
   }
@@ -823,6 +841,132 @@ router.get('/google/client', async (_req: Request, res: Response) => {
     });
   }
   return res.json({ success: true, data: { clientId } });
+});
+
+/** Démarre OAuth Google (navigateur Expo) — ne dépend plus de Next.js. */
+router.get('/google', async (req: Request, res: Response) => {
+  const clientId = googleClientId();
+  if (!clientId) {
+    return res.status(503).json({
+      success: false,
+      message: 'GOOGLE_CLIENT_ID non configuré sur le serveur',
+    });
+  }
+
+  const mobile = req.query.mobile === '1';
+  const clientNonce =
+    typeof req.query.client_nonce === 'string' ? req.query.client_nonce : null;
+  const returnTo = typeof req.query.return_to === 'string' ? req.query.return_to : null;
+
+  if (mobile && !isValidClientNonce(clientNonce)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Nonce Google invalide',
+    });
+  }
+
+  const redirectUri = googleCallbackUri(req);
+  const state = buildOAuthState(mobile, {
+    returnTo: isAllowedAppReturnTo(returnTo) ? returnTo : undefined,
+    nonce: mobile && clientNonce ? clientNonce : undefined,
+  });
+
+  const url = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+  url.searchParams.set('client_id', clientId);
+  url.searchParams.set('redirect_uri', redirectUri);
+  url.searchParams.set('response_type', 'code');
+  url.searchParams.set('scope', 'openid email profile');
+  url.searchParams.set('access_type', 'online');
+  url.searchParams.set('prompt', 'select_account');
+  url.searchParams.set('include_granted_scopes', 'true');
+  url.searchParams.set('state', state);
+  return res.redirect(url.toString());
+});
+
+router.get('/google/callback', async (req: Request, res: Response) => {
+  const code = typeof req.query.code === 'string' ? req.query.code : null;
+  const oauthError = typeof req.query.error === 'string' ? req.query.error : null;
+  const parsedState = parseOAuthState(
+    typeof req.query.state === 'string' ? req.query.state : null
+  );
+  const mobile = parsedState?.mobile === true;
+  const clientNonce = parsedState?.nonce;
+  const returnTo = parsedState?.returnTo;
+  const bounce = (extra: string) => {
+    if (isAllowedAppReturnTo(returnTo)) {
+      const sep = returnTo.includes('?') ? '&' : '?';
+      return res.redirect(`${returnTo}${sep}${extra}`);
+    }
+    return res.status(400).send('Connexion Google impossible');
+  };
+
+  if (oauthError || !code) {
+    return bounce(`error=${encodeURIComponent(oauthError || 'google_denied')}`);
+  }
+  if (!parsedState) {
+    return bounce('error=google_state');
+  }
+  if (mobile && (!clientNonce || clientNonce.length < 32)) {
+    return bounce('error=google_nonce');
+  }
+
+  const clientId = googleClientId();
+  const clientSecret = googleClientSecret();
+  const redirectUri = googleCallbackUri(req);
+  if (!clientId || !clientSecret) {
+    return bounce('error=google_config');
+  }
+  if (!isAllowedOAuthRedirectUri(redirectUri)) {
+    return bounce('error=google_redirect');
+  }
+
+  try {
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        client_id: clientId,
+        client_secret: clientSecret,
+        redirect_uri: redirectUri,
+        grant_type: 'authorization_code',
+      }),
+    });
+    const tokenData = (await tokenRes.json()) as {
+      id_token?: string;
+      error?: string;
+    };
+    if (!tokenRes.ok || !tokenData.id_token) {
+      console.error('Google token exchange failed:', tokenData.error);
+      return bounce('error=google_token');
+    }
+
+    const result = await completeGoogleLogin(req, {
+      idToken: tokenData.id_token,
+      mobile,
+      clientNonce,
+    });
+    if (result.status !== 200 || !result.body.success) {
+      return bounce('error=google_failed');
+    }
+
+    if (mobile) {
+      const inner =
+        result.body.data && typeof result.body.data === 'object'
+          ? (result.body.data as Record<string, unknown>)
+          : null;
+      const handoffCode = inner?.handoffCode;
+      if (typeof handoffCode !== 'string' || !isAllowedAppReturnTo(returnTo)) {
+        return bounce('error=google_session');
+      }
+      return res.redirect(appendHandoffCode(returnTo, handoffCode));
+    }
+
+    return bounce('error=google_web');
+  } catch (err) {
+    console.error('Google callback error:', err);
+    return bounce('error=google_failed');
+  }
 });
 
 const exchangeSchema = Joi.object({
