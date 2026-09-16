@@ -23,6 +23,9 @@ describe('MoneyTextFilterService (niveau 1)', () => {
   it('détecte les packages connus', () => {
     assert.equal(moneyTextFilterService.isMoneyPackage('com.mtn.momo'), true)
     assert.equal(moneyTextFilterService.isMoneyPackage('com.example.game'), false)
+    assert.equal(moneyTextFilterService.isMoneyPackage('com.whatsapp'), false)
+    assert.equal(moneyTextFilterService.isMoneyPackage('com.google.android.gm'), false)
+    assert.equal(moneyTextFilterService.isBlockedPackage('com.whatsapp'), true)
   })
 })
 

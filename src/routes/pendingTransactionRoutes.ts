@@ -311,11 +311,14 @@ router.post('/voice-note', premiumOnly, aiScanLimiter, async (req: Request, res:
       res.status(400).json({ success: false, message: 'Transcription vocale requise' });
       return;
     }
-    const item = await createFromVoiceNote(req.user!._id, text);
+    const items = await createFromVoiceNote(req.user!._id, text);
     res.status(201).json({
       success: true,
-      data: item,
-      message: 'Transaction proposée depuis la note vocale',
+      data: items,
+      message:
+        items.length > 1
+          ? `${items.length} transactions proposées depuis la note vocale`
+          : 'Transaction proposée depuis la note vocale',
     });
   } catch (e) {
     res.status(400).json({

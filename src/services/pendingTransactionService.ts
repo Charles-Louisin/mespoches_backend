@@ -16,6 +16,7 @@ import {
   imageAnalysisService,
   notificationAnalysisService,
   transactionDraftService,
+  moneyTextFilterService,
 } from './ai';
 import { LOW_CONFIDENCE_THRESHOLD } from '../config/aiModels';
 import { maybeSuggestRecurrence } from './recurrenceSuggestionService';
@@ -88,6 +89,10 @@ export async function createFromNotification(
   body: string,
   packageName?: string
 ): Promise<CreatePendingResult | null> {
+  if (packageName && moneyTextFilterService.isBlockedPackage(packageName)) {
+    return null;
+  }
+
   const identity = await getUserSmsIdentity(userId);
   const raw = `${title}\n${body}`.trim();
   const outcome = await notificationAnalysisService.analyze(raw, identity, {
@@ -240,9 +245,15 @@ export async function validatePendingTransaction(
   pending.category_id = categoryId ? new Types.ObjectId(categoryId) : null;
   await pending.save();
 
-  if (pending.source === 'sms' || pending.source === 'notification') {
+  const User = (await import('../models/User')).default;
+  const { isPremiumUser } = await import('../utils/subscription');
+  const user = await User.findById(userId);
+  if (user && isPremiumUser(user)) {
     const identity = await getUserSmsIdentity(userId);
-    const reparsed = parseMobileMoneySms(pending.raw_text, identity);
+    const reparsed =
+      pending.source === 'sms' || pending.source === 'notification'
+        ? parseMobileMoneySms(pending.raw_text, identity)
+        : null;
 
     const habit = await learnFromValidation(userId, {
       counterparty: pending.counterparty || reparsed?.counterparty || description,
@@ -271,12 +282,12 @@ export async function validatePendingTransaction(
 export async function createFromVoiceNote(
   userId: Types.ObjectId,
   spokenText: string
-): Promise<IPendingTransaction> {
+): Promise<IPendingTransaction[]> {
   const text = spokenText.trim();
   if (!text) throw new Error('Texte vocal vide');
 
   const analysis = await aiService.analyzeVoiceText(text);
-  if (!analysis.detected || !analysis.amount || !analysis.type) {
+  if (!analysis.detected || analysis.transactions.length === 0) {
     throw new Error('Impossible de détecter une transaction dans la note vocale');
   }
 
@@ -285,15 +296,10 @@ export async function createFromVoiceNote(
       ? "Certaines informations n'ont pas pu être reconnues avec certitude."
       : undefined;
 
-  return transactionDraftService.createFromVoiceAnalysis({
+  return transactionDraftService.createFromVoiceTransactions({
     userId,
     spokenText: text,
-    amount: analysis.amount,
-    type: analysis.type,
-    description: analysis.description,
-    confidence: analysis.confidence,
-    date: analysis.date,
-    items: analysis.items,
+    transactions: analysis.transactions,
     warning,
   });
 }

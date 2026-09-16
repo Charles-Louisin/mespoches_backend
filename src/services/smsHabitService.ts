@@ -1,6 +1,8 @@
 import { Types } from 'mongoose';
 import SmsHabit from '../models/SmsHabit';
 import User from '../models/User';
+import Category from '../models/Category';
+import Wallet from '../models/Wallet';
 import {
   counterpartyKey,
   ParsedMobileMoney,
@@ -136,6 +138,59 @@ export async function applyHabitsAndAi(
   };
 }
 
+export async function matchCategoryByHint(
+  userId: Types.ObjectId,
+  hint: string | null | undefined,
+  type: 'income' | 'expense'
+): Promise<Types.ObjectId | null> {
+  if (!hint?.trim()) return null;
+  const cats = await Category.find({ user_id: userId, type }).select('name');
+  const n = hint.trim().toLowerCase();
+  const exact = cats.find((c) => c.name.toLowerCase() === n);
+  if (exact) return exact._id;
+  const partial = cats.find(
+    (c) => c.name.toLowerCase().includes(n) || n.includes(c.name.toLowerCase())
+  );
+  return partial?._id ?? null;
+}
+
+/**
+ * Poche / catégorie par défaut. L'IA n'applique les habitudes apprises qu'en Premium.
+ */
+export async function resolveDraftPlacement(
+  userId: Types.ObjectId,
+  type: 'income' | 'expense',
+  description: string,
+  categoryHint?: string | null
+): Promise<{ wallet_id: Types.ObjectId | null; category_id: Types.ObjectId | null }> {
+  const fallbackWallet = await Wallet.findOne({
+    user_id: userId,
+    is_deleted: { $ne: true },
+  }).sort({ created_at: 1 });
+  const hinted = await matchCategoryByHint(userId, categoryHint, type);
+
+  const user = await User.findById(userId);
+  if (!user || !isPremiumUser(user)) {
+    return { wallet_id: fallbackWallet?._id ?? null, category_id: hinted };
+  }
+
+  const habits = await SmsHabit.find({ user_id: userId, type })
+    .sort({ validation_count: -1 })
+    .limit(30);
+  const desc = description.toLowerCase();
+  const match =
+    habits.find((h) => {
+      const d = (h.description || '').toLowerCase();
+      const c = (h.counterparty || '').toLowerCase();
+      return (d && d.length >= 3 && desc.includes(d.slice(0, 16))) || (c && c.length >= 3 && desc.includes(c.slice(0, 16)));
+    }) || null;
+
+  return {
+    wallet_id: match?.wallet_id ?? fallbackWallet?._id ?? null,
+    category_id: hinted ?? match?.category_id ?? null,
+  };
+}
+
 export async function learnFromValidation(
   userId: Types.ObjectId,
   data: {
@@ -152,7 +207,9 @@ export async function learnFromValidation(
     userCorrections?: boolean;
   }
 ) {
-  // return type: Promise<ISmsHabit | null> via findOneAndUpdate
+  const user = await User.findById(userId);
+  if (!user || !isPremiumUser(user)) return null;
+
   const key = counterpartyKey(data.counterparty, data.pattern);
 
   const learned_names: string[] = [];

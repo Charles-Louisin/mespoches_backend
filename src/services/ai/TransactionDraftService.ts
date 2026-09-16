@@ -3,6 +3,8 @@ import PendingTransaction, { IPendingTransaction } from '../../models/PendingTra
 import Wallet from '../../models/Wallet'
 import type { ImageAnalysisResult } from './ImageAnalysisService'
 import type { ParsedMobileMoney } from '../../utils/mobileMoneySmsParser'
+import type { AiVoiceTransaction } from './types'
+import { resolveDraftPlacement } from '../smsHabitService'
 
 /**
  * Crée uniquement des brouillons (status pending = pending_validation).
@@ -55,7 +57,13 @@ export class TransactionDraftService {
   }
 
   private mapLineItems(
-    items: ImageAnalysisResult['items']
+    items: Array<{
+      description: string
+      amount: number
+      quantity?: number
+      unit_amount?: number | null
+      type: 'income' | 'expense'
+    }>
   ): Array<{
     description: string
     amount: number
@@ -72,36 +80,51 @@ export class TransactionDraftService {
     }))
   }
 
+  private groupItemsByType<T extends { type: 'income' | 'expense' }>(items: T[]) {
+    return {
+      expense: items.filter((i) => i.type === 'expense'),
+      income: items.filter((i) => i.type === 'income'),
+    }
+  }
+
   /**
-   * Ticket multi-articles (courses, facture) → 1 seule pending groupée.
-   * SMS / capture mono-transaction → 1 pending par item.
+   * Ticket / note : 1 pending par type (dépense et/ou revenu),
+   * chacune avec toutes ses lignes (articles).
    */
   async createFromImageAnalysis(params: {
     userId: Types.ObjectId
     analysis: ImageAnalysisResult
   }): Promise<IPendingTransaction[]> {
-    const wallet_id = await this.getDefaultWalletId(params.userId)
     const analysis = params.analysis
-    const groupTypes = new Set([
-      'receipt',
-      'invoice',
-      'handwritten_list',
-      'handwritten_note',
-    ])
-    const shouldGroup =
-      analysis.items.length > 1 &&
-      (groupTypes.has(analysis.document_type) ||
-        analysis.items.every((i) => i.type === analysis.items[0].type))
+    const grouped = this.groupItemsByType(analysis.items)
+    const created: IPendingTransaction[] = []
+    const mixed = grouped.expense.length > 0 && grouped.income.length > 0
 
-    if (shouldGroup) {
-      const total = analysis.items.reduce((s, i) => s + i.amount, 0)
-      const expenseCount = analysis.items.filter((i) => i.type === 'expense').length
-      const type = expenseCount >= analysis.items.length / 2 ? 'expense' : 'income'
-      const firstDate = analysis.items.find((i) => i.date)?.date
-      const n = analysis.items.length
-      const description =
-        analysis.summary?.trim() ||
-        (type === 'expense' ? `Courses — ${n} articles` : `Reçus — ${n} lignes`)
+    for (const type of ['expense', 'income'] as const) {
+      const items = grouped[type]
+      if (!items.length) continue
+      const total = items.reduce((s, i) => s + i.amount, 0)
+      const firstDate = items.find((i) => i.date)?.date
+      const n = items.length
+      let description: string
+      if (mixed) {
+        description =
+          type === 'expense'
+            ? analysis.summary?.trim()
+              ? `${analysis.summary.trim()} — dépenses`
+              : `Dépenses — ${n} articles`
+            : `Revenus — ${n} lignes`
+      } else {
+        description =
+          analysis.summary?.trim() ||
+          (n > 1
+            ? type === 'expense'
+              ? `Courses — ${n} articles`
+              : `Reçus — ${n} lignes`
+            : items[0].description)
+      }
+
+      const placement = await resolveDraftPlacement(params.userId, type, description)
 
       const doc = await PendingTransaction.create({
         user_id: params.userId,
@@ -115,40 +138,14 @@ export class TransactionDraftService {
         description: description.slice(0, 200),
         date: firstDate ? new Date(firstDate) : new Date(),
         raw_text: analysis.summary,
-        wallet_id,
+        wallet_id: placement.wallet_id,
+        category_id: placement.category_id,
         confidence: analysis.confidence,
         pattern: 'unknown',
         ai_enriched: true,
         document_type: analysis.document_type,
         low_confidence_warning: analysis.warning,
-        ai_items: this.mapLineItems(analysis.items),
-      })
-      return [doc]
-    }
-
-    const created: IPendingTransaction[] = []
-    for (const item of analysis.items) {
-      const itemConfidence = item.confidence ?? analysis.confidence
-      const doc = await PendingTransaction.create({
-        user_id: params.userId,
-        status: 'pending',
-        source: 'ai_scan',
-        source_type: 'image',
-        type: item.type,
-        amount: item.amount,
-        operator: 'unknown',
-        counterparty: '',
-        description: item.description,
-        date: item.date ? new Date(item.date) : new Date(),
-        raw_text: analysis.summary,
-        wallet_id,
-        confidence: itemConfidence,
-        pattern: 'unknown',
-        ai_enriched: true,
-        document_type: analysis.document_type,
-        low_confidence_warning: analysis.warning,
-        ai_items:
-          analysis.items.length > 1 ? this.mapLineItems(analysis.items) : this.mapLineItems([item]),
+        ai_items: this.mapLineItems(items),
       })
       created.push(doc)
     }
@@ -156,44 +153,49 @@ export class TransactionDraftService {
     return created
   }
 
-  async createFromVoiceAnalysis(params: {
+  async createFromVoiceTransactions(params: {
     userId: Types.ObjectId
     spokenText: string
-    amount: number
-    type: 'income' | 'expense'
-    description: string
-    confidence: number
-    date?: string | null
-    items?: ImageAnalysisResult['items']
+    transactions: AiVoiceTransaction[]
     warning?: string
-  }): Promise<IPendingTransaction> {
-    const wallet_id = await this.getDefaultWalletId(params.userId)
-    const lineItems = params.items?.length ? this.mapLineItems(params.items) : []
-    const amount =
-      lineItems.length > 1
-        ? lineItems.reduce((s, i) => s + i.amount, 0)
-        : params.amount
+  }): Promise<IPendingTransaction[]> {
+    const created: IPendingTransaction[] = []
+    for (const tx of params.transactions) {
+      const lineItems = tx.items?.length ? this.mapLineItems(tx.items) : []
+      const amount =
+        lineItems.length > 0 ? lineItems.reduce((s, i) => s + i.amount, 0) : tx.amount
+      const description = tx.description || (tx.type === 'income' ? 'Revenu vocal' : 'Dépense vocale')
+      const placement = await resolveDraftPlacement(
+        params.userId,
+        tx.type,
+        description,
+        tx.category_hint
+      )
 
-    return PendingTransaction.create({
-      user_id: params.userId,
-      status: 'pending',
-      source: 'voice',
-      source_type: 'voice',
-      type: params.type,
-      amount,
-      operator: 'unknown',
-      counterparty: '',
-      description: params.description,
-      date: params.date ? new Date(params.date) : new Date(),
-      raw_text: params.spokenText.trim(),
-      wallet_id,
-      confidence: params.confidence,
-      pattern: 'unknown',
-      ai_enriched: true,
-      document_type: 'voice_note',
-      low_confidence_warning: params.warning,
-      ai_items: lineItems,
-    })
+      const doc = await PendingTransaction.create({
+        user_id: params.userId,
+        status: 'pending',
+        source: 'voice',
+        source_type: 'voice',
+        type: tx.type,
+        amount,
+        operator: 'unknown',
+        counterparty: '',
+        description,
+        date: tx.date ? new Date(tx.date) : new Date(),
+        raw_text: params.spokenText.trim(),
+        wallet_id: placement.wallet_id,
+        category_id: placement.category_id,
+        confidence: tx.confidence,
+        pattern: 'unknown',
+        ai_enriched: true,
+        document_type: 'voice_note',
+        low_confidence_warning: params.warning,
+        ai_items: lineItems,
+      })
+      created.push(doc)
+    }
+    return created
   }
 
   /**
@@ -229,7 +231,9 @@ export class TransactionDraftService {
       user_id: userId,
       status: 'pending',
       created_at: { $gte: since },
-    }).sort({ created_at: -1 }).limit(40)
+    })
+      .sort({ created_at: -1 })
+      .limit(40)
 
     const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim()
     const needle = norm(trimmed)
@@ -239,7 +243,6 @@ export class TransactionDraftService {
       const hay = norm(cand.raw_text || '')
       if (!hay) continue
 
-      // Même message sous forme SMS vs notif (l'un contient l'autre)
       if (needle.length >= 40 && hay.length >= 40) {
         if (hay.includes(needle) || needle.includes(hay)) return cand
       }

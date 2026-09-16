@@ -26,6 +26,7 @@ export class NotificationParserService {
 
   /** Filtrage rapide Niveau 1. */
   passesLevel1(text: string, packageName?: string): boolean {
+    if (packageName && this.filter.isBlockedPackage(packageName)) return false
     if (packageName && this.filter.isMoneyPackage(packageName)) return true
     return this.filter.isMoneyRelated(text)
   }

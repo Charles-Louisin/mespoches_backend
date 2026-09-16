@@ -29,6 +29,23 @@ export type AiImageExtraction = {
   items: AiImageItem[]
 }
 
+/** Une proposition vocale (dépense ou revenu), éventuellement multi-lignes. */
+export type AiVoiceTransaction = {
+  type: 'income' | 'expense'
+  description: string
+  category_hint: string | null
+  date: string | null
+  confidence: number
+  amount: number
+  items: AiImageItem[]
+}
+
+export type AiVoiceExtraction = {
+  detected: boolean
+  confidence: number
+  transactions: AiVoiceTransaction[]
+}
+
 /** Réponse JSON notification — format canonique MES POCHES. */
 export type AiNotificationExtraction = {
   detected: boolean

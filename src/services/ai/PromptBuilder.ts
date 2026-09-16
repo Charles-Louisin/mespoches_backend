@@ -35,7 +35,8 @@ Règles:
 - amount = montant TOTAL de la ligne (quantity × unit_amount). Ex: babouche 1000 × 2 → amount=2000, quantity=2, unit_amount=1000
 - quantity: entier >= 1 (défaut 1). unit_amount: prix unitaire si connu, sinon null
 - amount en nombre (ex: 1500), jamais de texte ni de devise dans amount
-- type: "expense" ou "income"
+- type: "expense" ou "income" — mets le bon type sur CHAQUE ligne
+- Si le document mélange dépenses ET revenus, garde les deux types (le serveur créera 2 transactions)
 - date: "YYYY-MM-DD" ou null (jamais la chaîne "ou null")
 - Si montant illisible, ignore la ligne
 - Maximum 30 items
@@ -119,7 +120,7 @@ Réponds UNIQUEMENT en JSON:
 
   buildVoiceTransactionPrompt(spokenText: string): string {
     return `Tu es l'assistant MES POCHES (Cameroun, XAF/FCFA).
-L'utilisateur dicte une transaction à créer (note vocale transcrite).
+L'utilisateur dicte une ou plusieurs transactions (note vocale transcrite).
 
 Texte:
 """
@@ -131,20 +132,28 @@ Réponds UNIQUEMENT avec un JSON valide. Aucun markdown.
 Format exact:
 {
   "detected": true,
-  "amount": 5000,
-  "type": "expense",
-  "description": "libellé court en français",
-  "category_hint": "nom catégorie ou null",
-  "date": "2026-07-30",
   "confidence": 0.0,
-  "items": []
+  "transactions": [
+    {
+      "type": "expense",
+      "description": "libellé court en français",
+      "category_hint": "nom catégorie ou null",
+      "date": "2026-07-30",
+      "confidence": 0.0,
+      "items": [
+        { "description": "tomates", "amount": 1500, "quantity": 1, "unit_amount": 1500, "type": "expense" }
+      ]
+    }
+  ]
 }
 
 Règles:
 - type: "expense" (dépense/achat/paiement) ou "income" (revenu/salaire/reçu)
-- Si plusieurs articles mentionnés (ex: tomate et pain), mets-les dans items[{description,amount,quantity,unit_amount,type}] et amount = somme
-- Sinon items = []
-- Si montant ou intention peu claire: detected=false, amount=null, confidence=0
+- Une entrée dans transactions par TYPE distinct. Si l'utilisateur parle d'une dépense ET d'un revenu, renvoie 2 objets (expense + income)
+- Plusieurs montants/articles du même type → UNE transaction avec plusieurs items
+- amount de chaque transaction = somme des items (ou le montant unique)
+- items: toujours renseigner si plus d'une ligne ; sinon items peut être [{description, amount, type}]
+- Si montant ou intention peu claire: detected=false, transactions=[]
 - date: YYYY-MM-DD ou null (aujourd'hui si non précisé côté serveur)
 `
   }

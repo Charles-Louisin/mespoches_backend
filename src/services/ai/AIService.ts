@@ -6,6 +6,8 @@ import type {
   AiImageExtraction,
   AiImageItem,
   AiNotificationExtraction,
+  AiVoiceExtraction,
+  AiVoiceTransaction,
   OpenRouterChatMessage,
 } from './types'
 
@@ -142,16 +144,7 @@ export class AIService {
     }
   }
 
-  async analyzeVoiceText(spokenText: string): Promise<{
-    detected: boolean
-    amount: number | null
-    type: 'income' | 'expense' | null
-    description: string
-    category_hint: string | null
-    date: string | null
-    confidence: number
-    items: AiImageItem[]
-  }> {
+  async analyzeVoiceText(spokenText: string): Promise<AiVoiceExtraction> {
     const messages = this.prompts.textMessages(
       this.prompts.buildVoiceTransactionPrompt(spokenText)
     )
@@ -161,42 +154,129 @@ export class AIService {
       messages,
     })
     const data = json as Record<string, unknown>
-    const amount = parseLooseAmount(data.amount)
-    const detected = Boolean(data.detected) && amount != null && amount > 0
-    const items: AiImageItem[] = []
-    if (Array.isArray(data.items)) {
-      for (const raw of data.items) {
-        const i = raw as Record<string, unknown>
-        if (!i?.description) continue
-        const lineAmount = parseLooseAmount(i.amount)
-        if (!lineAmount) continue
-        const quantity =
-          typeof i.quantity === 'number' && i.quantity >= 1 ? Math.round(i.quantity) : 1
-        const unitRaw = parseLooseAmount(i.unit_amount)
-        items.push({
-          description: String(i.description).slice(0, 200),
-          amount: lineAmount,
-          quantity,
-          unit_amount: unitRaw ?? (quantity > 1 ? lineAmount / quantity : lineAmount),
-          type: i.type === 'income' ? 'income' : 'expense',
-        })
+    const parsedTxs: AiVoiceTransaction[] = []
+
+    const pushTx = (raw: Record<string, unknown>, fallbackType?: 'income' | 'expense') => {
+      const items = this.normalizeLineItems(raw.items)
+      const type: 'income' | 'expense' =
+        raw.type === 'income' || raw.type === 'expense'
+          ? raw.type
+          : fallbackType ?? (items[0]?.type === 'income' ? 'income' : 'expense')
+      const typedItems = items.length
+        ? items.map((i) => ({
+            ...i,
+            type: i.type === 'income' || i.type === 'expense' ? i.type : type,
+          }))
+        : []
+      const amount =
+        typedItems.length > 0
+          ? typedItems.reduce((s, i) => s + i.amount, 0)
+          : parseLooseAmount(raw.amount)
+      if (!amount) return
+      const description = raw.description
+        ? String(raw.description).slice(0, 200)
+        : typedItems[0]?.description || 'Note vocale'
+      parsedTxs.push({
+        type,
+        description,
+        category_hint: raw.category_hint ? String(raw.category_hint).slice(0, 80) : null,
+        date: normalizeDate(raw.date),
+        confidence:
+          typeof raw.confidence === 'number' ? Math.min(1, Math.max(0, raw.confidence)) : 0.75,
+        amount,
+        items: typedItems.length
+          ? typedItems
+          : [{ description, amount, quantity: 1, unit_amount: amount, type }],
+      })
+    }
+
+    if (Array.isArray(data.transactions)) {
+      for (const raw of data.transactions) {
+        if (raw && typeof raw === 'object') pushTx(raw as Record<string, unknown>)
       }
     }
-    return {
-      detected,
-      amount: detected ? amount : null,
-      type: data.type === 'income' ? 'income' : data.type === 'expense' ? 'expense' : null,
-      description: data.description ? String(data.description).slice(0, 200) : 'Note vocale',
-      category_hint: data.category_hint ? String(data.category_hint).slice(0, 80) : null,
-      date: normalizeDate(data.date),
-      confidence:
-        typeof data.confidence === 'number'
-          ? Math.min(1, Math.max(0, data.confidence))
-          : detected
-            ? 0.75
-            : 0,
-      items,
+
+    if (parsedTxs.length === 0) {
+      const items = this.normalizeLineItems(data.items)
+      if (items.length > 0) {
+        const byType: Record<'income' | 'expense', AiImageItem[]> = { income: [], expense: [] }
+        for (const item of items) {
+          byType[item.type].push(item)
+        }
+        for (const type of ['expense', 'income'] as const) {
+          if (!byType[type].length) continue
+          pushTx(
+            {
+              type,
+              description: data.description,
+              category_hint: data.category_hint,
+              date: data.date,
+              confidence: data.confidence,
+              items: byType[type],
+            },
+            type
+          )
+        }
+      } else {
+        pushTx(data)
+      }
     }
+
+    const grouped = this.mergeVoiceByType(parsedTxs)
+    const detected = Boolean(data.detected !== false) && grouped.length > 0
+    const confidence =
+      typeof data.confidence === 'number'
+        ? Math.min(1, Math.max(0, data.confidence))
+        : grouped.length
+          ? grouped.reduce((s, t) => s + t.confidence, 0) / grouped.length
+          : 0
+
+    return { detected, confidence, transactions: detected ? grouped : [] }
+  }
+
+  private normalizeLineItems(raw: unknown): AiImageItem[] {
+    if (!Array.isArray(raw)) return []
+    const items: AiImageItem[] = []
+    for (const row of raw) {
+      const i = row as Record<string, unknown>
+      if (!i?.description) continue
+      const lineAmount = parseLooseAmount(i.amount)
+      if (!lineAmount) continue
+      const quantity =
+        typeof i.quantity === 'number' && i.quantity >= 1 ? Math.round(i.quantity) : 1
+      const unitRaw = parseLooseAmount(i.unit_amount)
+      items.push({
+        description: String(i.description).slice(0, 200),
+        amount: lineAmount,
+        quantity,
+        unit_amount: unitRaw ?? (quantity > 1 ? lineAmount / quantity : lineAmount),
+        type: i.type === 'income' ? 'income' : 'expense',
+      })
+    }
+    return items
+  }
+
+  /** Une transaction dépense + une transaction revenu, chacune avec toutes ses lignes. */
+  private mergeVoiceByType(txs: AiVoiceTransaction[]): AiVoiceTransaction[] {
+    const buckets: Record<'income' | 'expense', AiVoiceTransaction[]> = { income: [], expense: [] }
+    for (const tx of txs) buckets[tx.type].push(tx)
+    const merged: AiVoiceTransaction[] = []
+    for (const type of ['expense', 'income'] as const) {
+      const list = buckets[type]
+      if (!list.length) continue
+      const items = list.flatMap((t) => t.items)
+      const amount = items.reduce((s, i) => s + i.amount, 0)
+      merged.push({
+        type,
+        description: list[0].description,
+        category_hint: list.find((t) => t.category_hint)?.category_hint ?? null,
+        date: list.find((t) => t.date)?.date ?? null,
+        confidence: list.reduce((s, t) => s + t.confidence, 0) / list.length,
+        amount,
+        items,
+      })
+    }
+    return merged
   }
 
   formatError(err: unknown): string {
