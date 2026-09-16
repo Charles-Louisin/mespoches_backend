@@ -12,7 +12,7 @@ import {
 } from '../services/pendingTransactionService';
 import { getSmsHabitsSummary } from '../services/smsHabitService';
 import { analyzeSmsRecurrences } from '../utils/geminiSmsLearning';
-import { formatAiError } from '../services/ai';
+import { aiService, formatAiError } from '../services/ai';
 import { aiScanLimiter, parseIngestLimiter, MAX_PARSE_TEXT_CHARS } from '../utils/security';
 
 const router = Router();
@@ -306,9 +306,14 @@ router.post('/parse-notification', parseIngestLimiter, async (req: Request, res:
 
 router.post('/voice-note', premiumOnly, aiScanLimiter, async (req: Request, res: Response) => {
   try {
-    const text = String(req.body.text || '').trim().slice(0, MAX_PARSE_TEXT_CHARS);
+    const audio = String(req.body.audio || '').trim();
+    const mimeType = String(req.body.mimeType || 'audio/mp4');
+    let text = String(req.body.text || '').trim().slice(0, MAX_PARSE_TEXT_CHARS);
+    if (!text && audio) {
+      text = (await aiService.transcribeAudio(audio, mimeType)).slice(0, MAX_PARSE_TEXT_CHARS);
+    }
     if (!text) {
-      res.status(400).json({ success: false, message: 'Transcription vocale requise' });
+      res.status(400).json({ success: false, message: 'Audio ou transcription vocale requis' });
       return;
     }
     const items = await createFromVoiceNote(req.user!._id, text);

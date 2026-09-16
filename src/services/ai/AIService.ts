@@ -1,6 +1,7 @@
 import { TEXT_MODELS, VISION_MODELS } from '../../config/aiModels'
 import { extractJsonObject, formatAiError } from './aiLogger'
 import { modelFallbackService, ModelFallbackService } from './ModelFallbackService'
+import { openRouterService } from './OpenRouterService'
 import { promptBuilder, PromptBuilder } from './PromptBuilder'
 import type {
   AiImageExtraction,
@@ -108,6 +109,10 @@ export class AIService {
     })
 
     return this.normalizeImageExtraction(json, model)
+  }
+
+  async transcribeAudio(base64: string, mimeType: string): Promise<string> {
+    return openRouterService.transcribeAudio(base64, mimeType)
   }
 
   async analyzeNotificationText(text: string): Promise<AiNotificationExtraction> {

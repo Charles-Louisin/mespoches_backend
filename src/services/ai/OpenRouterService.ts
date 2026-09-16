@@ -96,6 +96,53 @@ export class OpenRouterService {
       latencyMs,
     }
   }
+
+  async transcribeAudio(base64: string, mimeType = 'audio/mp4'): Promise<string> {
+    this.ensureConfigured()
+    const raw = base64.includes(',') ? base64.slice(base64.indexOf(',') + 1) : base64
+    const buffer = Buffer.from(raw, 'base64')
+    if (!buffer.length) throw new Error('Audio vide')
+
+    const ext = mimeType.includes('webm')
+      ? 'webm'
+      : mimeType.includes('wav')
+        ? 'wav'
+        : mimeType.includes('mpeg') || mimeType.includes('mp3')
+          ? 'mp3'
+          : 'm4a'
+    const model = process.env.OPENROUTER_WHISPER_MODEL?.trim() || 'openai/whisper-large-v3'
+    const form = new FormData()
+    form.append(
+      'file',
+      new Blob([new Uint8Array(buffer)], { type: mimeType || 'audio/mp4' }),
+      `voice.${ext}`
+    )
+    form.append('model', model)
+    form.append('language', 'fr')
+
+    const res = await fetch(`${this.baseUrl}/audio/transcriptions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+        'HTTP-Referer': OPENROUTER_SITE_URL,
+        'X-Title': OPENROUTER_APP_NAME,
+      },
+      body: form,
+    })
+    const body = await res.text()
+    let data: { text?: string; error?: { message?: string } }
+    try {
+      data = JSON.parse(body) as typeof data
+    } catch {
+      throw new Error(`OpenRouter transcription illisible (HTTP ${res.status})`)
+    }
+    if (!res.ok) {
+      throw new Error(data.error?.message || `Transcription audio impossible (HTTP ${res.status})`)
+    }
+    const text = (data.text || '').trim()
+    if (!text) throw new Error('Aucun mot reconnu dans l’audio')
+    return text
+  }
 }
 
 function normalizeMessageContent(
