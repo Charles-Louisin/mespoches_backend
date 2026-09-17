@@ -42,7 +42,10 @@ import {
 
 const router = Router();
 
-router.use(authIpLimiter);
+router.use((req, res, next) => {
+  if (req.method === 'GET') return next();
+  return authIpLimiter(req, res, next);
+});
 
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '12h';
 
@@ -962,7 +965,7 @@ const exchangeSchema = Joi.object({
 });
 
 /** Échange le code OAuth (Vercel) contre une session — secret uniquement ici. */
-router.post('/google/exchange', loginLimiter, async (req: Request, res: Response) => {
+router.post('/google/exchange', async (req: Request, res: Response) => {
   try {
     const { error, value } = exchangeSchema.validate(req.body);
     if (error) {
@@ -1028,7 +1031,7 @@ router.post('/google/exchange', loginLimiter, async (req: Request, res: Response
   }
 });
 
-router.post('/google', loginLimiter, async (req: Request, res: Response) => {
+router.post('/google', async (req: Request, res: Response) => {
   try {
     const { error, value } = googleSchema.validate(req.body);
     if (error) {
@@ -1055,7 +1058,7 @@ const handoffSchema = Joi.object({
 });
 
 /** Échange atomique et à usage unique du code OAuth mobile contre la session JWT. */
-router.post('/google/handoff', loginLimiter, async (req: Request, res: Response) => {
+router.post('/google/handoff', async (req: Request, res: Response) => {
   try {
     const { error, value } = handoffSchema.validate(req.body);
     if (error) {

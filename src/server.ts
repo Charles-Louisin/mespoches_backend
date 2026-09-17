@@ -126,6 +126,8 @@ app.use(requestMetrics);
 const jsonSmall = express.json({ limit: '256kb' });
 const jsonLarge = express.json({ limit: '8mb' });
 app.use((req, res, next) => {
+  const ct = String(req.headers['content-type'] || '');
+  if (ct.includes('multipart/form-data')) return next();
   const path = (req.originalUrl || req.url || '').split('?')[0];
   const large =
     path.endsWith('/ai-scan') ||

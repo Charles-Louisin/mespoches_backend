@@ -23,7 +23,7 @@ const rateLimitBase = {
 export const authIpLimiter = rateLimit({
   ...rateLimitBase,
   windowMs: 15 * 60 * 1000,
-  max: 40,
+  max: 80,
   keyGenerator: (req) => `auth-ip:${clientIp(req)}`,
   message: {
     success: false,
