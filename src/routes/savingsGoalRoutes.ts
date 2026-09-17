@@ -35,9 +35,11 @@ router.get('/total', async (req: Request, res: Response) => {
 
 router.get('/', async (req: Request, res: Response) => {
   try {
-    const goals = await SavingsGoal.find({ user_id: req.user!._id }).sort({
-      created_at: -1,
-    });
+    const goals = await SavingsGoal.find({ user_id: req.user!._id })
+      .select('title target_amount saved_amount deadline created_at')
+      .sort({ created_at: -1 })
+      .limit(100)
+      .lean();
 
     const enriched = goals.map((g) => {
       const current = g.saved_amount ?? 0;

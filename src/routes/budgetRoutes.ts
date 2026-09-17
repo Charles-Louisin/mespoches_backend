@@ -26,7 +26,7 @@ router.get('/', async (req: Request, res: Response) => {
       user_id: req.user!._id,
       year,
       month,
-    }).populate('category_id');
+    }).populate('category_id', 'name type image_url');
 
     const start = new Date(year, month - 1, 1);
     const end = new Date(year, month, 0, 23, 59, 59);

@@ -148,6 +148,12 @@ const userSchema = new Schema<IUser>(
   { timestamps: true }
 );
 
+userSchema.index({ lastLoginAt: -1 });
+userSchema.index({ created_at: -1 });
+userSchema.index({ name: 1 });
+userSchema.index({ role: 1 });
+userSchema.index({ plan: 1, premiumUntil: 1 });
+
 userSchema.pre('save', async function (next) {
   if (!this.isModified('password') || !this.password) return next();
 

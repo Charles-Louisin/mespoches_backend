@@ -44,6 +44,7 @@ const subscriptionPaymentSchema = new Schema<ISubscriptionPayment>(
       type: String,
       enum: ['pending', 'completed', 'failed'],
       default: 'pending',
+      index: true,
     },
     cinetpay_transaction_id: { type: String, default: null, index: true },
     cinetpay_notify_token: { type: String, default: null },

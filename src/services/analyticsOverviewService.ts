@@ -5,6 +5,7 @@ import Budget from '../models/Budget'
 import SavingsGoal from '../models/SavingsGoal'
 import PlannedExpense from '../models/PlannedExpense'
 import { getTotalSavings } from '../utils/savingsAllocation'
+import { SAVINGS_LIST_SELECT, WALLET_LIST_SELECT } from '../utils/projections'
 
 export type MonthStats = {
   month: number
@@ -38,13 +39,6 @@ function monthRange(year: number, month: number) {
   return { start, end, daysInMonth: end.getDate() }
 }
 
-function entityId(value: unknown): string {
-  if (!value) return ''
-  if (typeof value === 'string') return value
-  if (typeof value === 'object' && '_id' in value) return String((value as { _id: unknown })._id)
-  return String(value)
-}
-
 function catName(value: unknown): string | null {
   if (value && typeof value === 'object' && 'name' in value) {
     const name = (value as { name?: string }).name
@@ -59,20 +53,28 @@ export async function getMonthStats(
   month: number
 ): Promise<MonthStats> {
   const { start, end } = monthRange(year, month)
-  const [incomeTransactions, expenseTransactions] = await Promise.all([
-    Transaction.find({ user_id: userId, type: 'income', date: { $gte: start, $lte: end } }),
-    Transaction.find({ user_id: userId, type: 'expense', date: { $gte: start, $lte: end } }),
+  const rows = await Transaction.aggregate<{ _id: string; total: number; count: number }>([
+    {
+      $match: {
+        user_id: userId,
+        type: { $in: ['income', 'expense'] },
+        date: { $gte: start, $lte: end },
+      },
+    },
+    { $group: { _id: '$type', total: { $sum: '$amount' }, count: { $sum: 1 } } },
   ])
-  const totalIncome = incomeTransactions.reduce((sum, t) => sum + t.amount, 0)
-  const totalExpense = expenseTransactions.reduce((sum, t) => sum + t.amount, 0)
+  const income = rows.find((r) => r._id === 'income')
+  const expense = rows.find((r) => r._id === 'expense')
+  const totalIncome = income?.total ?? 0
+  const totalExpense = expense?.total ?? 0
   return {
     month,
     year,
     totalIncome,
     totalExpense,
     balance: totalIncome - totalExpense,
-    incomeCount: incomeTransactions.length,
-    expenseCount: expenseTransactions.length,
+    incomeCount: income?.count ?? 0,
+    expenseCount: expense?.count ?? 0,
   }
 }
 
@@ -82,21 +84,77 @@ export async function getCategoryStats(
   start: Date,
   end: Date
 ): Promise<CategoryStat[]> {
-  const transactions = await Transaction.find({
+  const rows = await Transaction.aggregate<{ category: string; total: number; count: number }>([
+    {
+      $match: {
+        user_id: userId,
+        type,
+        category_id: { $ne: null },
+        date: { $gte: start, $lte: end },
+      },
+    },
+    {
+      $group: {
+        _id: '$category_id',
+        total: { $sum: '$amount' },
+        count: { $sum: 1 },
+      },
+    },
+    {
+      $lookup: {
+        from: 'categories',
+        localField: '_id',
+        foreignField: '_id',
+        as: 'cat',
+      },
+    },
+    { $unwind: { path: '$cat', preserveNullAndEmptyArrays: true } },
+    {
+      $project: {
+        _id: 0,
+        category: { $ifNull: ['$cat.name', 'Sans catégorie'] },
+        total: 1,
+        count: 1,
+      },
+    },
+    { $sort: { total: -1 } },
+  ])
+  return rows
+}
+
+function toHitFromLean(t: {
+  _id: unknown
+  description?: string
+  amount: number
+  date: Date
+  category_id?: unknown
+}): TxHit {
+  return {
+    id: String(t._id),
+    description: t.description || catName(t.category_id) || 'Mouvement',
+    amount: t.amount,
+    date: new Date(t.date).toISOString(),
+    category: catName(t.category_id),
+  }
+}
+
+async function topHits(
+  userId: Types.ObjectId,
+  type: 'income' | 'expense',
+  start: Date,
+  end: Date
+): Promise<TxHit[]> {
+  const rows = await Transaction.find({
     user_id: userId,
     type,
-    category_id: { $ne: null },
     date: { $gte: start, $lte: end },
-  }).populate('category_id')
-
-  const map: Record<string, CategoryStat> = {}
-  for (const tx of transactions) {
-    const name = catName(tx.category_id) || 'Sans catégorie'
-    if (!map[name]) map[name] = { category: name, total: 0, count: 0 }
-    map[name].total += tx.amount
-    map[name].count += 1
-  }
-  return Object.values(map).sort((a, b) => b.total - a.total)
+  })
+    .select('description amount date category_id')
+    .populate('category_id', 'name')
+    .sort({ amount: -1 })
+    .limit(5)
+    .lean()
+  return rows.map(toHitFromLean)
 }
 
 export async function buildMonthOverview(userId: Types.ObjectId, year: number, month: number) {
@@ -108,16 +166,28 @@ export async function buildMonthOverview(userId: Types.ObjectId, year: number, m
   const isCurrent = year === now.getFullYear() && month === now.getMonth() + 1
   const daysElapsed = isCurrent ? Math.max(1, now.getDate()) : daysInMonth
 
+  const matchMonth = {
+    user_id: userId,
+    date: { $gte: start, $lte: end },
+    is_transfer_mirror: { $ne: true },
+  }
+
   const [
     selected,
     previous,
     expenses,
     incomes,
     prevExpenses,
-    txs,
+    weekdayRaw,
+    walletFlow,
+    transferAgg,
+    savingsGoalAgg,
+    activeDaysAgg,
+    topExpenses,
+    topIncomes,
     wallets,
     budgets,
-    prevBudgets,
+    _prevBudgets,
     goals,
     totalSavings,
     planned,
@@ -127,33 +197,56 @@ export async function buildMonthOverview(userId: Types.ObjectId, year: number, m
     getCategoryStats(userId, 'expense', start, end),
     getCategoryStats(userId, 'income', start, end),
     getCategoryStats(userId, 'expense', prev.start, prev.end),
-    Transaction.find({
-      user_id: userId,
-      date: { $gte: start, $lte: end },
-      is_transfer_mirror: { $ne: true },
-    })
-      .populate('category_id')
-      .populate('wallet_id')
-      .populate('savings_goal_id')
-      .sort({ amount: -1 }),
-    Wallet.find({ user_id: userId, is_deleted: { $ne: true } }),
-    Budget.find({ user_id: userId, year, month }).populate('category_id'),
-    Budget.find({ user_id: userId, year: prevYear, month: prevMonth }).populate('category_id'),
-    SavingsGoal.find({ user_id: userId }),
+    Transaction.aggregate<{ _id: { dow: number; type: string }; total: number; count: number }>([
+      { $match: matchMonth },
+      {
+        $group: {
+          _id: { dow: { $dayOfWeek: '$date' }, type: '$type' },
+          total: { $sum: '$amount' },
+          count: { $sum: 1 },
+        },
+      },
+    ]),
+    Transaction.aggregate<{ _id: { wallet: Types.ObjectId; type: string }; total: number }>([
+      {
+        $match: {
+          ...matchMonth,
+          type: { $in: ['income', 'expense'] },
+          wallet_id: { $ne: null },
+        },
+      },
+      { $group: { _id: { wallet: '$wallet_id', type: '$type' }, total: { $sum: '$amount' } } },
+    ]),
+    Transaction.aggregate<{ volume: number; count: number }>([
+      { $match: { ...matchMonth, type: 'transfer' } },
+      { $group: { _id: null, volume: { $sum: '$amount' }, count: { $sum: 1 } } },
+    ]),
+    Transaction.aggregate<{ _id: Types.ObjectId; total: number }>([
+      { $match: { ...matchMonth, savings_goal_id: { $ne: null } } },
+      { $group: { _id: '$savings_goal_id', total: { $sum: '$amount' } } },
+    ]),
+    Transaction.aggregate<{ n: number }>([
+      { $match: matchMonth },
+      { $group: { _id: { $dateToString: { format: '%Y-%m-%d', date: '$date' } } } },
+      { $count: 'n' },
+    ]),
+    topHits(userId, 'expense', start, end),
+    topHits(userId, 'income', start, end),
+    Wallet.find({ user_id: userId, is_deleted: { $ne: true } }).select(WALLET_LIST_SELECT).lean(),
+    Budget.find({ user_id: userId, year, month }).populate('category_id', 'name').lean(),
+    Budget.find({ user_id: userId, year: prevYear, month: prevMonth }).populate('category_id', 'name').lean(),
+    SavingsGoal.find({ user_id: userId }).select(SAVINGS_LIST_SELECT).lean(),
     getTotalSavings(userId),
     PlannedExpense.find({
       user_id: userId,
       status: 'scheduled',
       scheduled_date: { $gte: start, $lte: end },
-    }),
+    })
+      .select('amount')
+      .lean(),
   ])
 
-  const incomesTx = txs.filter((t) => t.type === 'income')
-  const expensesTx = txs.filter((t) => t.type === 'expense')
-  const transfersTx = txs.filter((t) => t.type === 'transfer')
-  const savingsTx = txs.filter((t) => Boolean(t.savings_goal_id))
-
-  const activeDays = new Set(txs.map((t) => t.date.toISOString().slice(0, 10))).size
+  const activeDays = activeDaysAgg[0]?.n ?? 0
   const savingsRate = selected.totalIncome > 0 ? selected.balance / selected.totalIncome : null
   const expenseRatio = selected.totalIncome > 0 ? selected.totalExpense / selected.totalIncome : null
   const dailyExpenseAvg = selected.totalExpense / daysElapsed
@@ -166,33 +259,40 @@ export async function buildMonthOverview(userId: Types.ObjectId, year: number, m
   const cash = wallets.reduce((s, w) => s + (w.current_balance || 0), 0)
   const runwayDays = dailyExpenseAvg > 0 ? Math.floor(cash / dailyExpenseAvg) : null
 
-  const toHit = (t: (typeof txs)[number]): TxHit => ({
-    id: String(t._id),
-    description: t.description || catName(t.category_id) || 'Mouvement',
-    amount: t.amount,
-    date: t.date.toISOString(),
-    category: catName(t.category_id),
+  const weekday = WEEKDAYS.map((label, i) => {
+    const mongoDow = i + 1
+    const expense = weekdayRaw.find((r) => r._id.dow === mongoDow && r._id.type === 'expense')
+    const income = weekdayRaw.find((r) => r._id.dow === mongoDow && r._id.type === 'income')
+    const count = weekdayRaw
+      .filter((r) => r._id.dow === mongoDow)
+      .reduce((s, r) => s + r.count, 0)
+    return {
+      day: label,
+      expense: expense?.total ?? 0,
+      income: income?.total ?? 0,
+      count,
+    }
   })
 
-  const weekday = WEEKDAYS.map((label, i) => ({
-    day: label,
-    expense: expensesTx.filter((t) => t.date.getDay() === i).reduce((s, t) => s + t.amount, 0),
-    income: incomesTx.filter((t) => t.date.getDay() === i).reduce((s, t) => s + t.amount, 0),
-    count: txs.filter((t) => t.date.getDay() === i).length,
-  }))
+  const flowMap = new Map<string, { income: number; expense: number }>()
+  for (const row of walletFlow) {
+    const id = String(row._id.wallet)
+    const cur = flowMap.get(id) || { income: 0, expense: 0 }
+    if (row._id.type === 'income') cur.income = row.total
+    if (row._id.type === 'expense') cur.expense = row.total
+    flowMap.set(id, cur)
+  }
 
   const walletMix = wallets.map((w) => {
     const id = String(w._id)
-    const related = txs.filter((t) => entityId(t.wallet_id) === id)
-    const income = related.filter((t) => t.type === 'income').reduce((s, t) => s + t.amount, 0)
-    const expense = related.filter((t) => t.type === 'expense').reduce((s, t) => s + t.amount, 0)
+    const flow = flowMap.get(id) || { income: 0, expense: 0 }
     return {
       id,
       name: w.name,
       balance: w.current_balance,
-      income,
-      expense,
-      net: income - expense,
+      income: flow.income,
+      expense: flow.expense,
+      net: flow.income - flow.expense,
     }
   })
 
@@ -219,10 +319,8 @@ export async function buildMonthOverview(userId: Types.ObjectId, year: number, m
   })
 
   const monthInByGoal = new Map<string, number>()
-  for (const t of savingsTx) {
-    const goal = t.savings_goal_id as { _id?: unknown } | string | null
-    const key = String(typeof goal === 'object' && goal && '_id' in goal ? goal._id : goal)
-    monthInByGoal.set(key, (monthInByGoal.get(key) ?? 0) + t.amount)
+  for (const row of savingsGoalAgg) {
+    monthInByGoal.set(String(row._id), row.total)
   }
 
   const savingsRows = goals.map((g) => {
@@ -294,9 +392,9 @@ export async function buildMonthOverview(userId: Types.ObjectId, year: number, m
       cash,
       totalSavings,
       runwayDays,
-      transferVolume: transfersTx.reduce((s, t) => s + t.amount, 0),
-      transferCount: transfersTx.length,
-      savingsDeposited: savingsTx.reduce((s, t) => s + t.amount, 0),
+      transferVolume: transferAgg[0]?.volume ?? 0,
+      transferCount: transferAgg[0]?.count ?? 0,
+      savingsDeposited: savingsGoalAgg.reduce((s, r) => s + r.total, 0),
       plannedAmount: planned.reduce((s, p) => s + p.amount, 0),
       plannedCount: planned.length,
       budgetsOver: budgetRows.filter((b) => b.over).length,
@@ -306,11 +404,11 @@ export async function buildMonthOverview(userId: Types.ObjectId, year: number, m
     budgets: budgetRows,
     savings: savingsRows,
     weekday,
-    topExpenses: expensesTx.slice(0, 5).map(toHit),
-    topIncomes: incomesTx.slice(0, 5).map(toHit),
+    topExpenses,
+    topIncomes,
     categoryShifts,
-    largestExpense: expensesTx[0] ? toHit(expensesTx[0]) : null,
-    largestIncome: incomesTx[0] ? toHit(incomesTx[0]) : null,
+    largestExpense: topExpenses[0] ?? null,
+    largestIncome: topIncomes[0] ?? null,
   }
 }
 

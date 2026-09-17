@@ -14,6 +14,12 @@ import { getSmsHabitsSummary } from '../services/smsHabitService';
 import { analyzeSmsRecurrences } from '../utils/geminiSmsLearning';
 import { aiService, formatAiError } from '../services/ai';
 import { aiScanLimiter, parseIngestLimiter, MAX_PARSE_TEXT_CHARS } from '../utils/security';
+import { parseListPage, listMeta } from '../utils/pagination';
+import {
+  CATEGORY_LIST_SELECT,
+  PENDING_LIST_SELECT,
+  WALLET_LIST_SELECT,
+} from '../utils/projections';
 
 const router = Router();
 
@@ -22,16 +28,20 @@ router.use(protect);
 router.get('/', async (req: Request, res: Response) => {
   try {
     const status = (req.query.status as string) || 'pending';
+    const page = parseListPage(req.query, 50, 100);
     const list = await PendingTransaction.find({
       user_id: req.user!._id,
       status,
     })
-      .populate('wallet_id')
-      .populate('category_id')
+      .select(PENDING_LIST_SELECT)
+      .populate('wallet_id', WALLET_LIST_SELECT)
+      .populate('category_id', CATEGORY_LIST_SELECT)
       .sort({ created_at: -1 })
-      .limit(100);
+      .skip(page.skip)
+      .limit(page.limit)
+      .lean();
 
-    res.json({ success: true, data: list });
+    res.json({ success: true, ...listMeta(page, list.length), data: list });
   } catch (e) {
     res.status(500).json({
       success: false,

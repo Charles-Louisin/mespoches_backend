@@ -11,6 +11,12 @@ import {
   stripImageUrlIfFree,
 } from '../utils/subscription';
 import { getTotalSavings } from '../utils/savingsAllocation';
+import { parseListPage } from '../utils/pagination';
+import {
+  CATEGORY_LIST_SELECT,
+  TX_LIST_SELECT,
+  WALLET_LIST_SELECT,
+} from '../utils/projections';
 
 const router = Router();
 
@@ -32,7 +38,11 @@ router.get('/', protect, async (req: Request, res: Response) => {
     const wallets = await Wallet.find({
       user_id: req.user!._id,
       is_deleted: { $ne: true },
-    }).sort({ created_at: -1 });
+    })
+      .select(WALLET_LIST_SELECT)
+      .sort({ created_at: -1 })
+      .limit(100)
+      .lean();
 
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -69,9 +79,8 @@ router.get('/', protect, async (req: Request, res: Response) => {
 
     const data = wallets.map((w) => {
       const stats = monthByWallet.get(String(w._id)) || { income: 0, expense: 0 };
-      const plain = w.toObject();
       return {
-        ...plain,
+        ...w,
         month_income: stats.income,
         month_expense: stats.expense,
       };
@@ -96,7 +105,10 @@ router.get('/total-balance', protect, async (req: Request, res: Response) => {
     const wallets = await Wallet.find({
       user_id: req.user!._id,
       is_deleted: { $ne: true },
-    });
+    })
+      .select('name currency current_balance')
+      .limit(100)
+      .lean();
     const total = wallets.reduce((sum, w) => sum + w.current_balance, 0);
     const totalSavings = isPremiumUser(req.user!)
       ? await getTotalSavings(req.user!._id)
@@ -177,21 +189,28 @@ router.get('/:id/history', protect, async (req: Request, res: Response) => {
       baseQuery.date = { $gte: getFreeHistoryStartDate() };
     }
 
+    const page = parseListPage(req.query, 100, 200);
+
     const transactions = await Transaction.find(baseQuery)
-      .populate('wallet_id')
-      .populate('destination_wallet_id')
-      .populate('category_id')
+      .select(TX_LIST_SELECT)
+      .populate('wallet_id', WALLET_LIST_SELECT)
+      .populate('destination_wallet_id', WALLET_LIST_SELECT)
+      .populate('category_id', CATEGORY_LIST_SELECT)
       .sort({ date: -1 })
-      .limit(300);
+      .skip(page.skip)
+      .limit(page.limit)
+      .lean();
 
     const planned_expenses = await PlannedExpense.find({
       user_id: req.user!._id,
       wallet_id: req.params.id,
       status: 'scheduled',
     })
-      .populate('wallet_id')
-      .populate('category_id')
-      .sort({ scheduled_date: 1, created_at: 1 });
+      .populate('wallet_id', WALLET_LIST_SELECT)
+      .populate('category_id', CATEGORY_LIST_SELECT)
+      .sort({ scheduled_date: 1, created_at: 1 })
+      .limit(100)
+      .lean();
 
     return res.json({
       success: true,

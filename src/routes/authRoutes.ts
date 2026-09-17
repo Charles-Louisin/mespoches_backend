@@ -15,7 +15,8 @@ import PendingTransaction from '../models/PendingTransaction';
 import SmsHabit from '../models/SmsHabit';
 import NotificationPattern from '../models/NotificationPattern';
 import SubscriptionPayment from '../models/SubscriptionPayment';
-import { protect } from '../middleware/auth';
+import { invalidateUserCache, protect } from '../middleware/auth';
+import { sendExistingAccountEmail } from '../utils/email';
 import { toPublicUser } from '../utils/userPayload';
 import { getNewUserTrialFields, syncExpiredPremium } from '../utils/subscription';
 import {
@@ -64,11 +65,12 @@ async function revokeAllSessions(user: IUser): Promise<void> {
 }
 
 const CURRENCY_VALUES = ['XAF', 'XOF', 'EURO', 'DOLLARS'];
+const NAME_MAX_LENGTH = 60;
 
 const registerSchema = Joi.object({
   email: Joi.string().email().required(),
   password: Joi.string().min(10).max(128).required(),
-  name: Joi.string().allow('', null),
+  name: Joi.string().max(NAME_MAX_LENGTH).allow('', null),
   currency: Joi.string().valid(...CURRENCY_VALUES).optional(),
 });
 
@@ -95,25 +97,20 @@ function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/**
+ * Disponibilité du NOM public uniquement.
+ * L'email n'est volontairement pas vérifiable ici : ce serait un oracle
+ * d'énumération de comptes (cf. /register qui répond de façon générique).
+ */
 router.get('/check-availability', availabilityLimiter, async (req: Request, res: Response) => {
   try {
-    const emailRaw = req.query.email as string | undefined;
     const nameRaw = req.query.name as string | undefined;
     const data: {
-      email?: { available: boolean };
       name?: { available: boolean };
     } = {};
 
-    if (emailRaw && typeof emailRaw === 'string') {
-      const email = emailRaw.trim().toLowerCase();
-      if (email) {
-        const exists = await User.exists({ email });
-        data.email = { available: !exists };
-      }
-    }
-
     if (nameRaw && typeof nameRaw === 'string') {
-      const name = nameRaw.trim();
+      const name = nameRaw.trim().slice(0, NAME_MAX_LENGTH);
       if (name.length >= 2) {
         const exists = await User.exists({
           name: { $regex: new RegExp(`^${escapeRegex(name)}$`, 'i') },
@@ -147,11 +144,16 @@ router.post('/register', loginLimiter, async (req: Request, res: Response) => {
     const emailNorm = email.trim().toLowerCase();
     const nameNorm = name?.trim() || '';
 
+    // Réponse identique qu'un compte existe ou non (anti-énumération) :
+    // c'est le titulaire de la boîte mail qui est informé, pas l'appelant.
     const userExists = await User.findOne({ email: emailNorm });
     if (userExists) {
-      return res.status(400).json({
-        success: false,
-        message: 'Un compte existe déjà avec cet email',
+      await sendExistingAccountEmail(emailNorm).catch(() => undefined);
+      return res.status(201).json({
+        success: true,
+        needsVerification: true,
+        message: 'Compte créé. Vérifiez votre email avec le code reçu.',
+        data: { email: emailNorm },
       });
     }
 
@@ -300,16 +302,9 @@ router.post('/forgot-password', otpLimiter, async (req: Request, res: Response) 
       '+verificationCode +password'
     );
 
-    if (user) {
-      const cooldown = getResendCooldownSeconds(user);
-      if (cooldown > 0) {
-        return res.status(429).json({
-          success: false,
-          code: 'RESEND_COOLDOWN',
-          message: `Veuillez attendre ${cooldown} seconde(s) avant de renvoyer le code`,
-          data: { cooldownSeconds: cooldown },
-        });
-      }
+    // Le cooldown ne doit rien révéler : on saute l'envoi en silence
+    // plutôt que de renvoyer un 429 qui prouverait l'existence du compte.
+    if (user && getResendCooldownSeconds(user) === 0) {
       try {
         await setPasswordResetCode(user);
       } catch (err) {
@@ -384,6 +379,7 @@ router.post('/reset-password', otpLimiter, async (req: Request, res: Response) =
     }
     await revokeAllSessions(user);
     await user.save();
+    invalidateUserCache(String(user._id));
 
     const token = generateToken(user);
     return res.status(200).json({
@@ -418,10 +414,11 @@ router.post('/verify-email', otpLimiter, async (req: Request, res: Response) => 
     const user = await User.findOne({ email }).select(
       '+verificationCode +password'
     );
+    // Même réponse qu'un code erroné : ne pas révéler l'absence de compte.
     if (!user) {
-      return res.status(404).json({
+      return res.status(400).json({
         success: false,
-        message: 'Aucun compte associé à cet email',
+        message: 'Code incorrect ou expiré',
       });
     }
 
@@ -490,37 +487,20 @@ router.post('/resend-code', otpLimiter, async (req: Request, res: Response) => {
     const { email } = value;
 
     const user = await User.findOne({ email }).select('+verificationCode');
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'Aucun compte associé à cet email',
-      });
-    }
 
-    if (user.emailVerified) {
-      return res.status(400).json({
-        success: false,
-        message: 'Cet email est déjà vérifié',
-      });
-    }
-
-    const cooldown = getResendCooldownSeconds(user);
-    if (cooldown > 0) {
-      return res.status(429).json({
-        success: false,
-        code: 'RESEND_COOLDOWN',
-        message: `Veuillez attendre ${cooldown} seconde(s) avant de renvoyer le code`,
-        data: { cooldownSeconds: cooldown },
-      });
-    }
-
-    await setVerificationCode(user);
-
-    return res.status(200).json({
+    // Réponse générique : compte inexistant, déjà vérifié ou en cooldown
+    // donnent tous le même résultat visible côté appelant.
+    const generic = {
       success: true,
       message: 'Un nouveau code a été envoyé à votre adresse email',
-      data: { email: user.email },
-    });
+      data: { email },
+    };
+
+    if (user && !user.emailVerified && getResendCooldownSeconds(user) === 0) {
+      await setVerificationCode(user);
+    }
+
+    return res.status(200).json(generic);
   } catch (error) {
     console.error('Erreur resend-code:', error);
     return res.status(500).json({
@@ -624,6 +604,7 @@ router.post('/logout', protect, async (req: Request, res: Response) => {
     if (user) {
       await revokeAllSessions(user);
       await user.save();
+      invalidateUserCache(String(user._id));
     }
     return res.json({ success: true, message: 'Déconnecté' });
   } catch (error) {

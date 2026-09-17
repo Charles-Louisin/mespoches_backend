@@ -19,6 +19,7 @@ import webhookRoutes from './routes/webhookRoutes';
 import plannedExpenseRoutes from './routes/plannedExpenseRoutes';
 import pendingTransactionRoutes from './routes/pendingTransactionRoutes';
 import uploadRoutes from './routes/uploadRoutes';
+import telemetryRoutes from './routes/telemetryRoutes';
 import { startPlannedExpenseScheduler } from './jobs/plannedExpenseScheduler';
 import {
   getCinetPayEnvironment,
@@ -28,6 +29,8 @@ import {
 import { assertSetupAccess } from './utils/setupAccess';
 import { sanitizeMongoKeys } from './middleware/sanitize';
 import { apiLimiter } from './utils/security';
+import { connectMongo as openMongoPool, mongoPoolStats } from './db';
+import { metricsSnapshot, requestMetrics, requestTimeout } from './middleware/requestMetrics';
 
 const app = express();
 
@@ -53,6 +56,7 @@ app.use(
   helmet({
     contentSecurityPolicy: false,
     crossOriginResourcePolicy: { policy: 'cross-origin' },
+    frameguard: { action: 'deny' },
   })
 );
 
@@ -68,21 +72,28 @@ if (isProduction && configuredOrigins.length === 0) {
   process.exit(1);
 }
 
+/** Domaines que nous possédons. Tout le reste passe par CORS_ORIGIN. */
+function isOwnedOrigin(host: string): boolean {
+  if (host === 'mespoches.store' || host.endsWith('.mespoches.store')) return true;
+  if (host === 'mespoches.vercel.app') return true;
+  return false;
+}
+
+/** Hôtes de développement (jamais autorisés en production). */
+function isDevOrigin(host: string): boolean {
+  if (host === 'localhost' || host === '127.0.0.1') return true;
+  if (/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/.test(host)) return true;
+  if (host.endsWith('.exp.direct') || host.endsWith('.expo.dev')) return true;
+  if (host === 'auth.expo.io') return true;
+  return false;
+}
+
 function isAllowedCorsOrigin(origin: string): boolean {
   if (configuredOrigins.includes(origin)) return true;
   try {
     const host = new URL(origin).hostname.toLowerCase();
-    if (host === 'mespoches.store' || host.endsWith('.mespoches.store')) {
-      return true;
-    }
-    if (host === 'mespoches.vercel.app' || host.endsWith('.vercel.app')) {
-      return true;
-    }
-    if (host === 'localhost' || host === '127.0.0.1') return true;
-    if (/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/.test(host)) return true;
-    if (host.endsWith('.exp.direct') || host.endsWith('.expo.dev') || host === 'auth.expo.io') {
-      return true;
-    }
+    if (isOwnedOrigin(host)) return true;
+    if (!isProduction && isDevOrigin(host)) return true;
   } catch {
     /* ignore */
   }
@@ -109,8 +120,20 @@ app.use(
     credentials: true,
   })
 );
-app.use(express.json({ limit: '8mb' }));
-app.use(express.urlencoded({ extended: true, limit: '8mb' }));
+app.use(requestTimeout);
+app.use(requestMetrics);
+
+const jsonSmall = express.json({ limit: '256kb' });
+const jsonLarge = express.json({ limit: '8mb' });
+app.use((req, res, next) => {
+  const path = (req.originalUrl || req.url || '').split('?')[0];
+  const large =
+    path.endsWith('/ai-scan') ||
+    path.endsWith('/voice-note') ||
+    path.includes('/upload');
+  return (large ? jsonLarge : jsonSmall)(req, res, next);
+});
+app.use(express.urlencoded({ extended: true, limit: '256kb' }));
 app.use(sanitizeMongoKeys);
 app.use(apiLimiter);
 
@@ -143,7 +166,13 @@ app.get('/api/health', async (req, res) => {
     payload.cinetpay = await getCinetPaySetupPayload();
   }
 
-  res.json(payload);
+  res.json({ ...payload, process: { rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024) } });
+});
+
+/** Métriques process + temps par route — protégé (même secret que CinetPay setup). */
+app.get('/api/metrics', (req, res) => {
+  if (!assertSetupAccess(req, res)) return;
+  res.json({ success: true, data: { ...metricsSnapshot(), mongo: mongoPoolStats() } });
 });
 
 /** Alias racine — IP à whitelister (sandbox ou prod) — protégé */
@@ -168,6 +197,7 @@ app.use('/api/webhooks', webhookRoutes);
 app.use('/api/planned-expenses', plannedExpenseRoutes);
 app.use('/api/pending-transactions', pendingTransactionRoutes);
 app.use('/api/upload', uploadRoutes);
+app.use('/api/telemetry', telemetryRoutes);
 
 app.use(
   (
@@ -238,18 +268,15 @@ function logStartupBanner(mongoOk: boolean): void {
 
   console.log(`  Serveur       : http://localhost:${PORT}`);
   console.log(`  Health check  : http://localhost:${PORT}/api/health`);
+  console.log(`  Metrics (ops) : http://localhost:${PORT}/api/metrics`);
   console.log(`${line}\n`);
 }
 
-async function connectMongo(): Promise<void> {
+async function connectDatabase(): Promise<void> {
   console.log(`\n⏳ Connexion MongoDB (${NODE_ENV})...`);
 
   try {
-    await mongoose.connect(MONGODB_URI!, {
-      maxPoolSize: 20,
-      minPoolSize: 2,
-      serverSelectionTimeoutMS: 10_000,
-    });
+    await openMongoPool(MONGODB_URI!);
     console.log('✅ MongoDB connecté avec succès');
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -267,7 +294,7 @@ mongoose.connection.on('reconnected', () => {
 });
 
 async function startServer(): Promise<void> {
-  await connectMongo();
+  await connectDatabase();
   logStartupBanner(true);
 
   app.listen(PORT, () => {

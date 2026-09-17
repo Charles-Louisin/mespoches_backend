@@ -70,6 +70,7 @@ const recurringSchema = new Schema<IRecurringTransaction>(
 );
 
 recurringSchema.index({ user_id: 1, status: 1 });
+recurringSchema.index({ user_id: 1, active: 1, next_run_date: 1 });
 
 const RecurringTransaction: Model<IRecurringTransaction> =
   mongoose.models.RecurringTransaction ||

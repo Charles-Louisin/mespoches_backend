@@ -33,21 +33,34 @@ export class OpenRouterService {
     this.ensureConfigured()
     const started = Date.now()
 
-    const res = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.apiKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': OPENROUTER_SITE_URL,
-        'X-Title': OPENROUTER_APP_NAME,
-      },
-      body: JSON.stringify({
-        model: params.model,
-        messages: params.messages,
-        temperature: params.temperature ?? 0.1,
-        max_tokens: params.maxTokens ?? 2048,
-      }),
-    })
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), Number(process.env.OPENROUTER_TIMEOUT_MS || 20_000))
+    let res: Response
+    try {
+      res = await fetch(`${this.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': OPENROUTER_SITE_URL,
+          'X-Title': OPENROUTER_APP_NAME,
+        },
+        body: JSON.stringify({
+          model: params.model,
+          messages: params.messages,
+          temperature: params.temperature ?? 0.1,
+          max_tokens: params.maxTokens ?? 2048,
+        }),
+        signal: controller.signal,
+      })
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new Error(`OpenRouter ${params.model}: délai dépassé`)
+      }
+      throw err
+    } finally {
+      clearTimeout(timeout)
+    }
 
     const latencyMs = Date.now() - started
     const raw = await res.text()

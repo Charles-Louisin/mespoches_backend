@@ -41,9 +41,9 @@ async function getUserTransaction(
   id: string
 ) {
   return Transaction.findOne({ _id: id, user_id: userId })
-    .populate('wallet_id')
-    .populate('destination_wallet_id')
-    .populate('category_id');
+    .populate('wallet_id', 'name')
+    .populate('destination_wallet_id', 'name')
+    .populate('category_id', 'name');
 }
 
 router.get('/transactions', protect, premiumOnly, exportLimiter, async (req: Request, res: Response) => {
@@ -54,9 +54,9 @@ router.get('/transactions', protect, premiumOnly, exportLimiter, async (req: Req
       user_id: req.user!._id,
       ...listQuery,
     })
-      .populate('wallet_id')
-      .populate('destination_wallet_id')
-      .populate('category_id')
+      .populate('wallet_id', 'name')
+      .populate('destination_wallet_id', 'name')
+      .populate('category_id', 'name')
       .sort({ date: -1 })
       .limit(EXPORT_MAX_ROWS);
 

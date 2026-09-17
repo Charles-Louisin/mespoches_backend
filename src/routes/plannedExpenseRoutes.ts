@@ -8,6 +8,8 @@ import {
   normalizeScheduledDate,
 } from '../services/plannedExpenseService';
 import { isFutureUtcDay } from '../utils/plannedExpenseDates';
+import { parseListPage, listMeta } from '../utils/pagination';
+import { CATEGORY_LIST_SELECT, WALLET_LIST_SELECT } from '../utils/projections';
 
 const router = Router();
 
@@ -47,14 +49,18 @@ router.get('/', protect, async (req: Request, res: Response) => {
       query.status = 'scheduled';
     }
 
+    const page = parseListPage(req.query, 80, 200);
     const items = await PlannedExpense.find(query)
-      .populate('wallet_id')
-      .populate('category_id')
-      .sort({ scheduled_date: 1, created_at: 1 });
+      .populate('wallet_id', WALLET_LIST_SELECT)
+      .populate('category_id', CATEGORY_LIST_SELECT)
+      .sort({ scheduled_date: 1, created_at: 1 })
+      .skip(page.skip)
+      .limit(page.limit)
+      .lean();
 
     return res.json({
       success: true,
-      count: items.length,
+      ...listMeta(page, items.length),
       data: items,
     });
   } catch (error) {

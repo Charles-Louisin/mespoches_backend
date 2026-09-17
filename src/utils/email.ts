@@ -75,6 +75,36 @@ export async function sendPasswordResetEmail(
   }
 }
 
+/**
+ * Prévient le titulaire qu'une inscription a été tentée avec son email.
+ * Permet à /register de répondre la même chose qu'un compte existe ou non.
+ */
+export async function sendExistingAccountEmail(to: string): Promise<void> {
+  if (!process.env.RESEND_API_KEY) {
+    console.warn('RESEND_API_KEY manquant — notification compte existant ignorée');
+    return;
+  }
+
+  const { error } = await resend.emails.send({
+    from: FROM_EMAIL,
+    to,
+    ...(REPLY_TO ? { replyTo: REPLY_TO } : {}),
+    subject: 'Tentative d’inscription — MES POCHES',
+    html: `
+      <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
+        <h1 style="color: #0ea5e9; font-size: 24px;">MES POCHES</h1>
+        <p>Quelqu'un vient d'essayer de créer un compte avec cette adresse email, mais un compte existe déjà.</p>
+        <p>Si c'était vous, connectez-vous normalement. Mot de passe oublié ? Utilisez « Mot de passe oublié » sur la page de connexion.</p>
+        <p style="color: #6b7280; font-size: 14px;">Si ce n'était pas vous, aucune action n'est nécessaire : votre compte n'a pas été modifié.</p>
+      </div>
+    `,
+  });
+
+  if (error) {
+    console.error('Erreur Resend compte existant:', error);
+  }
+}
+
 interface PlannedExpenseReminderRow {
   amount: number;
   description: string;

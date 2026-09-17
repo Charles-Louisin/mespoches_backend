@@ -10,7 +10,13 @@ import { allocateToSavingsGoal } from '../utils/savingsAllocation';
 import { isFutureUtcDay } from '../utils/plannedExpenseDates';
 import { resolveOwnedCategoryId } from '../utils/ownership';
 import { debitWallet, creditWallet } from '../services/walletTransaction';
-import { parseListLimit } from '../utils/jobLock';
+import { parseListPage, listMeta } from '../utils/pagination';
+import {
+  CATEGORY_LIST_SELECT,
+  SAVINGS_LIST_SELECT,
+  TX_LIST_SELECT,
+  WALLET_LIST_SELECT,
+} from '../utils/projections';
 
 const router = Router();
 
@@ -300,7 +306,7 @@ router.get('/', protect, async (req: Request, res: Response) => {
       }
     }
 
-    const limit = parseListLimit(req.query.limit, 200, 500);
+    const page = parseListPage(req.query, 50, 200);
 
     const transactions = await Transaction.find({
       ...query,
@@ -309,15 +315,18 @@ router.get('/', protect, async (req: Request, res: Response) => {
         { type: 'transfer', is_transfer_mirror: { $ne: true } },
       ],
     })
-      .populate('wallet_id')
-      .populate('destination_wallet_id')
-      .populate('category_id')
-      .populate('savings_goal_id')
+      .select(TX_LIST_SELECT)
+      .populate('wallet_id', WALLET_LIST_SELECT)
+      .populate('destination_wallet_id', WALLET_LIST_SELECT)
+      .populate('category_id', CATEGORY_LIST_SELECT)
+      .populate('savings_goal_id', SAVINGS_LIST_SELECT)
       .sort({ date: -1 })
-      .limit(limit);
+      .skip(page.skip)
+      .limit(page.limit)
+      .lean();
 
     const seenTransferKeys = new Set<string>();
-    const filtered: ITransaction[] = [];
+    const filtered: typeof transactions = [];
 
     for (const t of transactions) {
       if (t.type !== 'transfer') {
@@ -352,7 +361,7 @@ router.get('/', protect, async (req: Request, res: Response) => {
 
     return res.json({
       success: true,
-      count: filtered.length,
+      ...listMeta(page, filtered.length),
       data: filtered,
     });
   } catch (error) {
@@ -370,9 +379,9 @@ router.get('/:id', protect, async (req: Request, res: Response) => {
       _id: req.params.id,
       user_id: req.user!._id,
     })
-      .populate('wallet_id')
-      .populate('destination_wallet_id')
-      .populate('category_id');
+      .populate('wallet_id', WALLET_LIST_SELECT)
+      .populate('destination_wallet_id', WALLET_LIST_SELECT)
+      .populate('category_id', CATEGORY_LIST_SELECT);
 
     if (!transaction) {
       return res.status(404).json({

@@ -34,9 +34,11 @@ router.get('/', async (req: Request, res: Response) => {
       ];
     }
     const items = await RecurringTransaction.find(filter)
-      .populate('wallet_id')
-      .populate('category_id')
-      .sort({ next_run_date: 1 });
+      .populate('wallet_id', 'name currency image_url')
+      .populate('category_id', 'name type')
+      .sort({ next_run_date: 1 })
+      .limit(100)
+      .lean();
     return res.json({ success: true, data: items });
   } catch (error) {
     console.error('Erreur get recurring:', error);

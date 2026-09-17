@@ -29,7 +29,7 @@ router.get('/', protect, async (req: Request, res: Response) => {
       query.type = type;
     }
 
-    const categories = await Category.find(query).sort({ name: 1 });
+    const categories = await Category.find(query).select('name type image_url created_at').sort({ name: 1 }).limit(200).lean();
 
     return res.json({
       success: true,

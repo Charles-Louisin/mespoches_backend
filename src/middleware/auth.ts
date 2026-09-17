@@ -10,6 +10,21 @@ interface JwtPayload {
   tv?: number;
 }
 
+const USER_CACHE_TTL_MS = 8_000;
+const USER_CACHE_MAX = 2_000;
+const userCache = new Map<string, { user: IUser; exp: number }>();
+
+function cacheKey(id: string, tv: number): string {
+  return `${id}:${tv}`;
+}
+
+export function invalidateUserCache(userId: string): void {
+  const prefix = `${userId}:`;
+  for (const key of userCache.keys()) {
+    if (key.startsWith(prefix)) userCache.delete(key);
+  }
+}
+
 export async function protect(
   req: Request,
   res: Response,
@@ -28,7 +43,22 @@ export async function protect(
         process.env.JWT_SECRET as string
       ) as JwtPayload;
 
-      const user = await User.findById(decoded.id).select('-password');
+      const tv = decoded.tv ?? 0;
+      const key = cacheKey(decoded.id, tv);
+      const hit = userCache.get(key);
+      let user: IUser | null = hit && hit.exp > Date.now() ? hit.user : null;
+
+      if (!user) {
+        user = (await User.findById(decoded.id).select('-password -loginHistory -verificationCode')) as IUser | null;
+        if (user) {
+          if (userCache.size >= USER_CACHE_MAX) {
+            const first = userCache.keys().next().value;
+            if (first) userCache.delete(first);
+          }
+          userCache.set(key, { user, exp: Date.now() + USER_CACHE_TTL_MS });
+        }
+      }
+
       if (!user) {
         res.status(401).json({
           success: false,
@@ -38,7 +68,8 @@ export async function protect(
       }
 
       const tokenVersion = user.tokenVersion ?? 0;
-      if ((decoded.tv ?? 0) !== tokenVersion) {
+      if (tv !== tokenVersion) {
+        userCache.delete(key);
         res.status(401).json({
           success: false,
           code: 'SESSION_REVOKED',

@@ -12,6 +12,8 @@ const jobLockSchema = new Schema<IJobLock>({
   expiresAt: { type: Date, required: true },
 });
 
+jobLockSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+
 const JobLock: Model<IJobLock> =
   mongoose.models.JobLock || mongoose.model<IJobLock>('JobLock', jobLockSchema);
 

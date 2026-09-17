@@ -56,6 +56,7 @@ const walletSchema = new Schema<IWallet>(
 );
 
 walletSchema.index({ user_id: 1, created_at: -1 });
+walletSchema.index({ user_id: 1, is_deleted: 1, created_at: -1 });
 
 const Wallet: Model<IWallet> =
   mongoose.models.Wallet || mongoose.model<IWallet>('Wallet', walletSchema);

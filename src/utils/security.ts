@@ -102,6 +102,7 @@ export const apiLimiter = rateLimit({
   keyGenerator: (req) => `api:${clientIp(req)}`,
   skip: (req) =>
     req.path === '/api/health' ||
+    req.path === '/api/metrics' ||
     req.path.startsWith('/api/webhooks') ||
     req.path.startsWith('/webhooks'),
   message: {
@@ -147,6 +148,21 @@ export const parseIngestLimiter = rateLimit({
     success: false,
     code: 'RATE_LIMITED',
     message: 'Trop de notifications analysées. Réessayez dans une heure.',
+  },
+});
+
+export const telemetryLimiter = rateLimit({
+  ...rateLimitBase,
+  windowMs: 15 * 60 * 1000,
+  max: 80,
+  keyGenerator: (req) => {
+    const uid = req.user?._id ? String(req.user._id) : clientIp(req);
+    return `telemetry:${uid}`;
+  },
+  message: {
+    success: false,
+    code: 'RATE_LIMITED',
+    message: 'Trop d’événements. Réessayez plus tard.',
   },
 });
 
