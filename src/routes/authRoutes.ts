@@ -146,7 +146,7 @@ function mongoDupField(error: unknown): string | null {
   return keys[0] ?? 'unknown';
 }
 
-router.post('/register', loginLimiter, async (req: Request, res: Response) => {
+router.post('/register', async (req: Request, res: Response) => {
   let emailNorm = '';
   try {
     const { error, value } = registerSchema.validate(req.body);
@@ -161,6 +161,10 @@ router.post('/register', loginLimiter, async (req: Request, res: Response) => {
 
     emailNorm = email.trim().toLowerCase();
     const nameNorm = name?.trim() || '';
+
+    await User.updateMany({ googleId: null }, { $unset: { googleId: 1 } }).catch(
+      () => undefined
+    );
 
     // Réponse identique qu'un compte existe ou non (anti-énumération) :
     // c'est le titulaire de la boîte mail qui est informé, pas l'appelant.
@@ -214,21 +218,68 @@ router.post('/register', loginLimiter, async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Erreur register:', error);
     const dup = mongoDupField(error);
-    if (dup === 'email' && emailNorm) {
-      await sendExistingAccountEmail(emailNorm).catch(() => undefined);
-      return res.status(201).json({
-        success: true,
-        needsVerification: true,
-        message: 'Compte créé. Vérifiez votre email avec le code reçu.',
-        data: { email: emailNorm },
-      });
-    }
     if (dup === 'name') {
       return res.status(400).json({
         success: false,
         message: 'Ce nom est déjà utilisé',
       });
     }
+
+    if (emailNorm) {
+      if (dup === 'googleId') {
+        await User.updateMany({ googleId: null }, { $unset: { googleId: 1 } }).catch(
+          () => undefined
+        );
+      }
+
+      const existing = await User.findOne({ email: emailNorm });
+      if (existing) {
+        if (!existing.emailVerified) {
+          await setVerificationCode(existing).catch((err) =>
+            console.error('Erreur envoi verification après inscription:', err)
+          );
+        } else {
+          await sendExistingAccountEmail(emailNorm).catch(() => undefined);
+        }
+        return res.status(201).json({
+          success: true,
+          needsVerification: true,
+          message: 'Compte créé. Vérifiez votre email avec le code reçu.',
+          data: { email: emailNorm },
+        });
+      }
+
+      if (dup === 'googleId') {
+        try {
+          const retry = registerSchema.validate(req.body);
+          if (!retry.error) {
+            const user = await User.create({
+              email: emailNorm,
+              password: retry.value.password,
+              name: retry.value.name?.trim() || undefined,
+              role: 'user',
+              emailVerified: false,
+              currency: retry.value.currency || 'XAF',
+              plan: 'free',
+              premiumUntil: null,
+              premiumSource: null,
+            });
+            await setVerificationCode(user).catch((err) =>
+              console.error('Erreur envoi verification après inscription:', err)
+            );
+            return res.status(201).json({
+              success: true,
+              needsVerification: true,
+              message: 'Compte créé. Vérifiez votre email avec le code reçu.',
+              data: { email: user.email },
+            });
+          }
+        } catch (retryErr) {
+          console.error('Erreur register retry googleId:', retryErr);
+        }
+      }
+    }
+
     return res.status(500).json({
       success: false,
       message: "Erreur lors de l'inscription",

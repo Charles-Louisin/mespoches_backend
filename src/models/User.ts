@@ -61,7 +61,6 @@ const userSchema = new Schema<IUser>(
     },
     googleId: {
       type: String,
-      default: null,
       sparse: true,
       unique: true,
     },
