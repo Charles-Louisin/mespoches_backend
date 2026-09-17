@@ -30,6 +30,7 @@ import {
   loginLimiter,
   otpLimiter,
   availabilityLimiter,
+  handoffPollLimiter,
 } from '../utils/security';
 import {
   appendHandoffCode,
@@ -44,6 +45,7 @@ const router = Router();
 
 router.use((req, res, next) => {
   if (req.method === 'GET') return next();
+  if (req.path.endsWith('/google/handoff-poll')) return next();
   return authIpLimiter(req, res, next);
 });
 
@@ -132,7 +134,20 @@ router.get('/check-availability', availabilityLimiter, async (req: Request, res:
   }
 });
 
+function mongoDupField(error: unknown): string | null {
+  if (!error || typeof error !== 'object') return null;
+  const err = error as {
+    code?: number;
+    keyPattern?: Record<string, unknown>;
+    keyValue?: Record<string, unknown>;
+  };
+  if (err.code !== 11000) return null;
+  const keys = Object.keys(err.keyPattern || err.keyValue || {});
+  return keys[0] ?? 'unknown';
+}
+
 router.post('/register', loginLimiter, async (req: Request, res: Response) => {
+  let emailNorm = '';
   try {
     const { error, value } = registerSchema.validate(req.body);
     if (error) {
@@ -144,7 +159,7 @@ router.post('/register', loginLimiter, async (req: Request, res: Response) => {
 
     const { email, password, name } = value;
 
-    const emailNorm = email.trim().toLowerCase();
+    emailNorm = email.trim().toLowerCase();
     const nameNorm = name?.trim() || '';
 
     // Réponse identique qu'un compte existe ou non (anti-énumération) :
@@ -184,7 +199,11 @@ router.post('/register', loginLimiter, async (req: Request, res: Response) => {
       premiumSource: null,
     });
 
-    await setVerificationCode(user);
+    try {
+      await setVerificationCode(user);
+    } catch (err) {
+      console.error('Erreur envoi verification après inscription:', err);
+    }
 
     return res.status(201).json({
       success: true,
@@ -194,6 +213,22 @@ router.post('/register', loginLimiter, async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('Erreur register:', error);
+    const dup = mongoDupField(error);
+    if (dup === 'email' && emailNorm) {
+      await sendExistingAccountEmail(emailNorm).catch(() => undefined);
+      return res.status(201).json({
+        success: true,
+        needsVerification: true,
+        message: 'Compte créé. Vérifiez votre email avec le code reçu.',
+        data: { email: emailNorm },
+      });
+    }
+    if (dup === 'name') {
+      return res.status(400).json({
+        success: false,
+        message: 'Ce nom est déjà utilisé',
+      });
+    }
     return res.status(500).json({
       success: false,
       message: "Erreur lors de l'inscription",
@@ -500,7 +535,11 @@ router.post('/resend-code', otpLimiter, async (req: Request, res: Response) => {
     };
 
     if (user && !user.emailVerified && getResendCooldownSeconds(user) === 0) {
-      await setVerificationCode(user);
+      try {
+        await setVerificationCode(user);
+      } catch (err) {
+        console.error('Erreur envoi verification resend:', err);
+      }
     }
 
     return res.status(200).json(generic);
@@ -1057,6 +1096,10 @@ const handoffSchema = Joi.object({
   clientNonce: Joi.string().min(32).max(128).required(),
 });
 
+const handoffPollSchema = Joi.object({
+  clientNonce: Joi.string().min(32).max(128).required(),
+});
+
 /** Échange atomique et à usage unique du code OAuth mobile contre la session JWT. */
 router.post('/google/handoff', async (req: Request, res: Response) => {
   try {
@@ -1101,6 +1144,45 @@ router.post('/google/handoff', async (req: Request, res: Response) => {
       success: false,
       message: 'Finalisation Google impossible',
     });
+  }
+});
+
+/**
+ * L’APK poll ce endpoint si Chrome Custom Tabs n’a pas renvoyé le deep link
+ * alors que le compte Google est déjà créé.
+ */
+router.post('/google/handoff-poll', handoffPollLimiter, async (req: Request, res: Response) => {
+  try {
+    const { error, value } = handoffPollSchema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: 'Nonce Google invalide',
+      });
+    }
+
+    const handoff = await AuthHandoff.findOneAndDelete(
+      {
+        clientNonceHash: hashHandoffCode(value.clientNonce),
+        expiresAt: { $gt: new Date() },
+      },
+      { sort: { createdAt: -1 } }
+    );
+
+    if (!handoff) {
+      return res.status(202).json({ success: false, pending: true });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        token: handoff.token,
+        user: { emailVerified: handoff.emailVerified },
+      },
+    });
+  } catch (err) {
+    console.error('Erreur Google handoff-poll:', err);
+    return res.status(202).json({ success: false, pending: true });
   }
 });
 

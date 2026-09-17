@@ -80,6 +80,19 @@ export const availabilityLimiter = rateLimit({
   },
 });
 
+/** Poll session Google mobile — beaucoup d’appels courts pendant Custom Tabs. */
+export const handoffPollLimiter = rateLimit({
+  ...rateLimitBase,
+  windowMs: 15 * 60 * 1000,
+  max: 120,
+  keyGenerator: (req) => `handoff-poll:${clientIp(req)}`,
+  message: {
+    success: false,
+    code: 'RATE_LIMITED',
+    message: 'Trop de requêtes. Réessayez plus tard.',
+  },
+});
+
 export const aiScanLimiter = rateLimit({
   ...rateLimitBase,
   windowMs: 60 * 60 * 1000,
