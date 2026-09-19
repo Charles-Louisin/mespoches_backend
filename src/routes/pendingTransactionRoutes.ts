@@ -179,6 +179,23 @@ router.put('/:id', async (req: Request, res: Response) => {
     }
     await item.save();
 
+    try {
+      const { learnFromValidation } = await import('../services/smsHabitService');
+      if (item.wallet_id) {
+        await learnFromValidation(req.user!._id, {
+          counterparty: item.counterparty || item.description || '',
+          pattern: item.pattern || 'unknown',
+          type: item.type,
+          wallet_id: item.wallet_id as typeof item.wallet_id,
+          category_id: (item.category_id as typeof item.category_id) || null,
+          description: item.description || '',
+          userCorrections: true,
+        });
+      }
+    } catch {
+      /* apprentissage optionnel */
+    }
+
     res.json({ success: true, data: item });
   } catch (e) {
     res.status(500).json({
@@ -261,7 +278,12 @@ router.post('/parse-sms', parseIngestLimiter, async (req: Request, res: Response
     }
 
     if (created.duplicate) {
-      res.status(200).json({ success: true, data: created.item, duplicate: true });
+      res.status(200).json({
+        success: true,
+        data: created.item,
+        duplicate: true,
+        alreadyValidated: !!created.alreadyValidated,
+      });
       return;
     }
 
@@ -301,7 +323,12 @@ router.post('/parse-notification', parseIngestLimiter, async (req: Request, res:
     }
 
     if (created.duplicate) {
-      res.status(200).json({ success: true, data: created.item, duplicate: true });
+      res.status(200).json({
+        success: true,
+        data: created.item,
+        duplicate: true,
+        alreadyValidated: !!created.alreadyValidated,
+      });
       return;
     }
 

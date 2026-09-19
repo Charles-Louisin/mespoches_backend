@@ -1,5 +1,6 @@
 import { Types } from 'mongoose'
 import PendingTransaction, { IPendingTransaction } from '../../models/PendingTransaction'
+import Transaction from '../../models/Transaction'
 import Wallet from '../../models/Wallet'
 import type { ImageAnalysisResult } from './ImageAnalysisService'
 import type { ParsedMobileMoney } from '../../utils/mobileMoneySmsParser'
@@ -201,50 +202,64 @@ export class TransactionDraftService {
   /**
    * Évite les doublons SMS + notification / re-posts Android pour le même événement.
    * Ordre : transaction_id → raw_text exact → chevauchement texte → montant+type+opérateur récents.
+   * Inclut les pending déjà validées et les transactions définitives.
    */
   async findDuplicate(
     userId: Types.ObjectId,
     text: string,
     parsed: Pick<ParsedMobileMoney, 'transaction_id' | 'amount' | 'type' | 'operator' | 'counterparty'>
   ): Promise<IPendingTransaction | null> {
+    const match = await this.findDuplicateMatch(userId, text, parsed)
+    return match?.item ?? null
+  }
+
+  async findDuplicateMatch(
+    userId: Types.ObjectId,
+    text: string,
+    parsed: Pick<ParsedMobileMoney, 'transaction_id' | 'amount' | 'type' | 'operator' | 'counterparty'>
+  ): Promise<{ item: IPendingTransaction | null; alreadyValidated: boolean } | null> {
     const trimmed = text.trim()
     const transactionId = (parsed.transaction_id || '').trim()
+    const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim()
+    const needle = norm(trimmed)
+    const party = norm(parsed.counterparty || '')
+
+    const matchPending = (doc: IPendingTransaction) => ({
+      item: doc,
+      alreadyValidated: doc.status === 'validated',
+    })
 
     if (transactionId) {
       const byTx = await PendingTransaction.findOne({
         user_id: userId,
-        status: 'pending',
         transaction_id: transactionId,
-      })
-      if (byTx) return byTx
+        status: { $in: ['pending', 'validated'] },
+      }).sort({ created_at: -1 })
+      if (byTx) return matchPending(byTx)
     }
 
     const exact = await PendingTransaction.findOne({
       user_id: userId,
-      status: 'pending',
       raw_text: trimmed,
-    })
-    if (exact) return exact
+      status: { $in: ['pending', 'validated'] },
+    }).sort({ created_at: -1 })
+    if (exact) return matchPending(exact)
 
     const since = new Date(Date.now() - 30 * 60 * 1000)
     const recent = await PendingTransaction.find({
       user_id: userId,
-      status: 'pending',
+      status: { $in: ['pending', 'validated'] },
       created_at: { $gte: since },
     })
       .sort({ created_at: -1 })
-      .limit(40)
-
-    const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim()
-    const needle = norm(trimmed)
-    const party = norm(parsed.counterparty || '')
+      .limit(60)
 
     for (const cand of recent) {
       const hay = norm(cand.raw_text || '')
       if (!hay) continue
 
       if (needle.length >= 40 && hay.length >= 40) {
-        if (hay.includes(needle) || needle.includes(hay)) return cand
+        if (hay.includes(needle) || needle.includes(hay)) return matchPending(cand)
       }
 
       if (cand.amount !== parsed.amount || cand.type !== parsed.type) continue
@@ -255,7 +270,22 @@ export class TransactionDraftService {
       const candParty = norm(cand.counterparty || '')
       if (party && candParty && party !== candParty) continue
 
-      return cand
+      return matchPending(cand)
+    }
+
+    const hint = party || needle.slice(0, 32)
+    if (hint.length >= 4) {
+      const dayStart = new Date()
+      dayStart.setHours(0, 0, 0, 0)
+      const escaped = hint.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const recorded = await Transaction.findOne({
+        user_id: userId,
+        amount: parsed.amount,
+        type: parsed.type,
+        date: { $gte: dayStart },
+        description: { $regex: escaped, $options: 'i' },
+      })
+      if (recorded) return { item: null, alreadyValidated: true }
     }
 
     return null

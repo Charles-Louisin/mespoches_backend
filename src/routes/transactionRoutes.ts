@@ -578,14 +578,6 @@ router.post('/expense', protect, async (req: Request, res: Response) => {
 
 router.post('/transfer', protect, async (req: Request, res: Response) => {
   try {
-    if (!isPremiumUser(req.user!)) {
-      return sendLimitError(
-        res,
-        'Les transferts entre poches sont réservés aux abonnés Premium.',
-        { premium: true }
-      );
-    }
-
     const { error, value } = transferSchema.validate(req.body);
     if (error) {
       return res.status(400).json({
@@ -606,6 +598,13 @@ router.post('/transfer', protect, async (req: Request, res: Response) => {
     }
 
     if (toSavings) {
+      if (!isPremiumUser(req.user!)) {
+        return sendLimitError(
+          res,
+          'L\'épargne est réservée aux abonnés Premium.',
+          { premium: true }
+        );
+      }
       const transaction = await allocateToSavingsGoal({
         userId: req.user!._id,
         type: 'expense',

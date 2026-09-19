@@ -53,8 +53,9 @@ async function buildFromParsed(
 }
 
 export type CreatePendingResult = {
-  item: IPendingTransaction;
+  item: IPendingTransaction | null;
   duplicate: boolean;
+  alreadyValidated?: boolean;
 };
 
 export async function createFromSms(
@@ -69,12 +70,14 @@ export async function createFromSms(
 
   if (!outcome.parsed) return null;
 
-  const existing = await transactionDraftService.findDuplicate(
+  const existing = await transactionDraftService.findDuplicateMatch(
     userId,
     text,
     outcome.parsed
   );
-  if (existing) return { item: existing, duplicate: true };
+  if (existing) {
+    return { item: existing.item, duplicate: true, alreadyValidated: existing.alreadyValidated };
+  }
 
   const item = await buildFromParsed(userId, outcome.parsed, text, source, {
     fromAi: outcome.sourceLevel === 'ai',
@@ -102,12 +105,14 @@ export async function createFromNotification(
 
   if (!outcome.parsed) return null;
 
-  const existing = await transactionDraftService.findDuplicate(
+  const existing = await transactionDraftService.findDuplicateMatch(
     userId,
     raw,
     outcome.parsed
   );
-  if (existing) return { item: existing, duplicate: true };
+  if (existing) {
+    return { item: existing.item, duplicate: true, alreadyValidated: existing.alreadyValidated };
+  }
 
   const item = await buildFromParsed(userId, outcome.parsed, raw, 'notification', {
     fromAi: outcome.sourceLevel === 'ai',
@@ -285,6 +290,18 @@ export async function createFromVoiceNote(
 ): Promise<IPendingTransaction[]> {
   const text = spokenText.trim();
   if (!text) throw new Error('Texte vocal vide');
+
+  const sameVoice = await PendingTransaction.findOne({
+    user_id: userId,
+    raw_text: text,
+    status: { $in: ['pending', 'validated'] },
+  }).sort({ created_at: -1 });
+  if (sameVoice) {
+    if (sameVoice.status === 'validated') {
+      throw new Error('Cette transaction a déjà été validée auparavant');
+    }
+    return [sameVoice];
+  }
 
   const analysis = await aiService.analyzeVoiceText(text);
   if (!analysis.detected || analysis.transactions.length === 0) {
