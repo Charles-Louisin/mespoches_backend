@@ -34,7 +34,7 @@ export class OpenRouterService {
     const started = Date.now()
 
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), Number(process.env.OPENROUTER_TIMEOUT_MS || 20_000))
+    const timeout = setTimeout(() => controller.abort(), Number(process.env.OPENROUTER_TIMEOUT_MS || 60_000))
     let res: Response
     try {
       res = await fetch(`${this.baseUrl}/chat/completions`, {

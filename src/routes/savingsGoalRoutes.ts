@@ -44,7 +44,8 @@ router.get('/', async (req: Request, res: Response) => {
     const enriched = goals.map((g) => {
       const current = g.saved_amount ?? 0;
       return {
-        ...g.toObject(),
+        ...g,
+        _id: String(g._id),
         current_amount: current,
         progress_percent:
           g.target_amount > 0
