@@ -6,6 +6,7 @@ import {
   parseMobileMoneySms,
   ParsedMobileMoney,
 } from '../utils/mobileMoneySmsParser';
+import { parseVoiceNote, VOICE_PARSE_HIGH, VOICE_PARSE_MEDIUM } from '../utils/voiceTransactionParser';
 import {
   applyHabitsAndAi,
   getUserSmsIdentity,
@@ -138,6 +139,9 @@ export async function createFromAiScan(
     userId,
     analysis,
   });
+  if (!items.length) {
+    throw new Error('Rien de lisible sur la photo. Rapprochez le ticket et réessayez.');
+  }
 
   return {
     items,
@@ -303,22 +307,88 @@ export async function createFromVoiceNote(
     return [sameVoice];
   }
 
-  const analysis = await aiService.analyzeVoiceText(text);
-  if (!analysis.detected || analysis.transactions.length === 0) {
-    throw new Error('Impossible de détecter une transaction dans la note vocale');
+  const parsed = parseVoiceNote(text);
+  if (parsed.detected && parsed.amount && parsed.confidence >= VOICE_PARSE_MEDIUM) {
+    const warning =
+      parsed.confidence < VOICE_PARSE_HIGH
+        ? "Certaines informations n'ont pas pu être reconnues avec certitude."
+        : undefined;
+    return transactionDraftService.createFromVoiceTransactions({
+      userId,
+      spokenText: text,
+      fromParser: true,
+      warning,
+      transactions: [
+        {
+          type: parsed.type,
+          description: parsed.description,
+          category_hint: parsed.category_hint,
+          date: parsed.date,
+          confidence: parsed.confidence,
+          amount: parsed.amount,
+          items: [
+            {
+              description: parsed.description,
+              amount: parsed.amount,
+              quantity: 1,
+              unit_amount: parsed.amount,
+              type: parsed.type,
+            },
+          ],
+        },
+      ],
+    });
   }
 
-  const warning =
-    analysis.confidence < LOW_CONFIDENCE_THRESHOLD
-      ? "Certaines informations n'ont pas pu être reconnues avec certitude."
-      : undefined;
+  try {
+    const analysis = await aiService.analyzeVoiceText(text);
+    if (!analysis.detected || analysis.transactions.length === 0) {
+      throw new Error('Impossible de détecter une transaction dans la note vocale');
+    }
 
-  return transactionDraftService.createFromVoiceTransactions({
-    userId,
-    spokenText: text,
-    transactions: analysis.transactions,
-    warning,
-  });
+    const warning =
+      analysis.confidence < LOW_CONFIDENCE_THRESHOLD
+        ? "Certaines informations n'ont pas pu être reconnues avec certitude."
+        : undefined;
+
+    return transactionDraftService.createFromVoiceTransactions({
+      userId,
+      spokenText: text,
+      transactions: analysis.transactions,
+      warning,
+    });
+  } catch (err) {
+    if (parsed.detected && parsed.amount) {
+      return transactionDraftService.createFromVoiceTransactions({
+        userId,
+        spokenText: text,
+        fromParser: true,
+        warning: "Certaines informations n'ont pas pu être reconnues avec certitude.",
+        transactions: [
+          {
+            type: parsed.type,
+            description: parsed.description,
+            category_hint: parsed.category_hint,
+            date: parsed.date,
+            confidence: parsed.confidence,
+            amount: parsed.amount,
+            items: [
+              {
+                description: parsed.description,
+                amount: parsed.amount,
+                quantity: 1,
+                unit_amount: parsed.amount,
+                type: parsed.type,
+              },
+            ],
+          },
+        ],
+      });
+    }
+    throw err instanceof Error
+      ? err
+      : new Error('Impossible de détecter une transaction dans la note vocale');
+  }
 }
 
 export async function countPending(userId: Types.ObjectId): Promise<number> {

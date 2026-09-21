@@ -1,4 +1,5 @@
 export { AIService, aiService } from './AIService'
+export { OpenAiService, openAiService } from './OpenAiService'
 export { OpenRouterService, openRouterService } from './OpenRouterService'
 export { ModelFallbackService, modelFallbackService } from './ModelFallbackService'
 export { PromptBuilder, promptBuilder } from './PromptBuilder'

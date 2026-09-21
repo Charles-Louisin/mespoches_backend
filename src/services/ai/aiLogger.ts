@@ -58,20 +58,45 @@ export function formatAiError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err)
   const lower = msg.toLowerCase()
 
-  if (lower.includes('openrouter_api_key') || lower.includes('api key')) {
-    return 'Clé OpenRouter non configurée sur le serveur.'
+  if (
+    /unknownhost|unable to resolve host|failed to connect|econnrefused|enotfound|fetch failed|network/i.test(
+      lower
+    )
+  ) {
+    return 'Pas de connexion. Vérifiez Internet et réessayez.'
   }
-  if (lower.includes('429') || lower.includes('rate limit') || lower.includes('quota')) {
+  if (/java\.|exception:|at com\.|stacktrace|statuscode/i.test(lower)) {
+    return 'Analyse impossible. Réessayez.'
+  }
+  if (lower.includes('openai_api_key') || lower.includes('openrouter_api_key') || lower.includes('api key')) {
+    return 'Clé IA non configurée sur le serveur.'
+  }
+  if (lower.includes('429') || lower.includes('rate limit') || lower.includes('quota') || lower.includes('insufficient_quota')) {
     return 'Quota IA atteint. Réessayez dans 1 à 2 minutes.'
   }
-  if (lower.includes('tous les modèles') || lower.includes('tous les modeles')) {
-    return 'Service IA temporairement indisponible. Réessayez plus tard.'
+  if (
+    /model.*(not found|introuvable|does not exist)|no endpoints found|tous les modèles|tous les modeles/i.test(
+      lower
+    )
+  ) {
+    return 'Service d’analyse momentanément indisponible. Réessayez plus tard.'
   }
-  if (lower.includes('aucune transaction')) {
-    return 'Aucune transaction détectée.'
+  if (
+    /aucun mot reconnu|audio vide|rien de lisible dans l[’']audio|transcription audio|note vocale/i.test(
+      lower
+    )
+  ) {
+    return 'Rien de lisible dans l’audio. Parlez plus clairement et réessayez.'
+  }
+  if (/rien de lisible sur la photo|image vide|ticket illisible|analyse.*image/i.test(lower)) {
+    return 'Rien de lisible sur la photo. Rapprochez le ticket et réessayez.'
+  }
+  if (lower.includes('aucune transaction') || lower.includes('détecter une transaction')) {
+    return 'Aucune transaction détectée. Précisez le montant et réessayez.'
   }
   if (lower.includes('illisible') || lower.includes('json')) {
     return "L'IA n'a pas pu extraire les informations. Réessayez avec une image plus nette."
   }
-  return msg.length > 180 ? 'Analyse IA impossible. Réessayez.' : msg
+  if (msg.length > 140) return 'Analyse IA impossible. Réessayez.'
+  return msg
 }

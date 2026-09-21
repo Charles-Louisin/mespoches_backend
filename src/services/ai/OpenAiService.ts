@@ -1,52 +1,49 @@
-import {
-  OPENROUTER_APP_NAME,
-  OPENROUTER_BASE_URL,
-  OPENROUTER_SITE_URL,
-} from '../../config/aiModels'
 import type { OpenRouterChatMessage, OpenRouterCompletionResult } from './types'
 
-/**
- * Client HTTP unique vers OpenRouter (API compatible OpenAI).
- * Changer de fournisseur = toucher surtout cette classe.
- */
-export class OpenRouterService {
-  private readonly apiKey: string
-  private readonly baseUrl: string
+const OPENAI_BASE = (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '')
 
-  constructor(apiKey = process.env.OPENROUTER_API_KEY?.trim() || '') {
+/**
+ * Client OpenAI payant (gpt-4o-mini + whisper-1).
+ * Prioritaire dès que OPENAI_API_KEY est présent.
+ */
+export class OpenAiService {
+  private readonly apiKey: string
+
+  constructor(apiKey = process.env.OPENAI_API_KEY?.trim() || '') {
     this.apiKey = apiKey
-    this.baseUrl = OPENROUTER_BASE_URL.replace(/\/$/, '')
+  }
+
+  isConfigured(): boolean {
+    return Boolean(this.apiKey)
   }
 
   ensureConfigured(): void {
-    if (!this.apiKey) {
-      throw new Error('OPENROUTER_API_KEY non configurée sur le serveur')
-    }
+    if (!this.apiKey) throw new Error('OPENAI_API_KEY non configurée sur le serveur')
   }
 
   async chatCompletion(params: {
-    model: string
+    model?: string
     messages: OpenRouterChatMessage[]
     temperature?: number
     maxTokens?: number
   }): Promise<OpenRouterCompletionResult> {
     this.ensureConfigured()
     const started = Date.now()
-
+    const model = params.model || process.env.OPENAI_CHAT_MODEL?.trim() || 'gpt-4o-mini'
+    const timeoutMs = Number(process.env.OPENAI_TIMEOUT_MS || process.env.OPENROUTER_TIMEOUT_MS || 90_000)
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), Number(process.env.OPENROUTER_TIMEOUT_MS || 90_000))
+    const timeout = setTimeout(() => controller.abort(), timeoutMs)
+
     let res: Response
     try {
-      res = await fetch(`${this.baseUrl}/chat/completions`, {
+      res = await fetch(`${OPENAI_BASE}/chat/completions`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${this.apiKey}`,
           'Content-Type': 'application/json',
-          'HTTP-Referer': OPENROUTER_SITE_URL,
-          'X-Title': OPENROUTER_APP_NAME,
         },
         body: JSON.stringify({
-          model: params.model,
+          model,
           messages: params.messages,
           temperature: params.temperature ?? 0.1,
           max_tokens: params.maxTokens ?? 2048,
@@ -55,58 +52,37 @@ export class OpenRouterService {
       })
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') {
-        throw new Error(`OpenRouter ${params.model}: délai dépassé`)
+        throw new Error(`OpenAI ${model}: délai dépassé`)
       }
       throw err
     } finally {
       clearTimeout(timeout)
     }
 
-    const latencyMs = Date.now() - started
     const raw = await res.text()
     let data: {
-      error?: { message?: string; code?: string }
-      choices?: Array<{
-        message?: { content?: string | Array<{ type?: string; text?: string }> }
-        finish_reason?: string
-      }>
-      usage?: {
-        prompt_tokens?: number
-        completion_tokens?: number
-        total_tokens?: number
-      }
+      error?: { message?: string }
+      choices?: Array<{ message?: { content?: string | Array<{ type?: string; text?: string }> } }>
+      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
       model?: string
     }
-
     try {
       data = JSON.parse(raw) as typeof data
     } catch {
-      throw new Error(`OpenRouter réponse invalide (HTTP ${res.status})`)
+      throw new Error(`OpenAI réponse invalide (HTTP ${res.status})`)
     }
-
     if (!res.ok) {
-      const errMsg = data.error?.message || raw.slice(0, 200) || `HTTP ${res.status}`
-      throw new Error(`OpenRouter ${params.model}: ${errMsg}`)
+      throw new Error(`OpenAI ${model}: ${data.error?.message || raw.slice(0, 200) || `HTTP ${res.status}`}`)
     }
-
-    const choice = data.choices?.[0]
-    const finish = (choice?.finish_reason || '').toLowerCase()
-    if (finish.includes('content_filter') || finish.includes('safety')) {
-      throw new Error(`OpenRouter ${params.model}: content_filter / refused`)
-    }
-
-    const content = normalizeMessageContent(choice?.message?.content)
-    if (!content) {
-      throw new Error(`OpenRouter ${params.model}: réponse vide`)
-    }
-
+    const content = normalizeMessageContent(data.choices?.[0]?.message?.content)
+    if (!content) throw new Error(`OpenAI ${model}: réponse vide`)
     return {
       content,
-      model: data.model || params.model,
+      model: data.model || model,
       promptTokens: data.usage?.prompt_tokens ?? 0,
       completionTokens: data.usage?.completion_tokens ?? 0,
       totalTokens: data.usage?.total_tokens ?? 0,
-      latencyMs,
+      latencyMs: Date.now() - started,
     }
   }
 
@@ -115,7 +91,6 @@ export class OpenRouterService {
     const raw = base64.includes(',') ? base64.slice(base64.indexOf(',') + 1) : base64
     const buffer = Buffer.from(raw, 'base64')
     if (!buffer.length) throw new Error('Audio vide')
-
     const ext = mimeType.includes('webm')
       ? 'webm'
       : mimeType.includes('wav')
@@ -123,34 +98,25 @@ export class OpenRouterService {
         : mimeType.includes('mpeg') || mimeType.includes('mp3')
           ? 'mp3'
           : 'm4a'
-    const model = process.env.OPENROUTER_WHISPER_MODEL?.trim() || 'openai/whisper-large-v3'
     const form = new FormData()
-    form.append(
-      'file',
-      new Blob([new Uint8Array(buffer)], { type: mimeType || 'audio/mp4' }),
-      `voice.${ext}`
-    )
-    form.append('model', model)
+    form.append('file', new Blob([new Uint8Array(buffer)], { type: mimeType || 'audio/mp4' }), `voice.${ext}`)
+    form.append('model', process.env.OPENAI_WHISPER_MODEL?.trim() || 'whisper-1')
     form.append('language', 'fr')
 
-    const timeoutMs = Number(process.env.OPENROUTER_TIMEOUT_MS || 90_000)
+    const timeoutMs = Number(process.env.OPENAI_TIMEOUT_MS || process.env.OPENROUTER_TIMEOUT_MS || 90_000)
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), timeoutMs)
     let res: Response
     try {
-      res = await fetch(`${this.baseUrl}/audio/transcriptions`, {
+      res = await fetch(`${OPENAI_BASE}/audio/transcriptions`, {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-          'HTTP-Referer': OPENROUTER_SITE_URL,
-          'X-Title': OPENROUTER_APP_NAME,
-        },
+        headers: { Authorization: `Bearer ${this.apiKey}` },
         body: form,
         signal: controller.signal,
       })
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') {
-        throw new Error('OpenRouter transcription: délai dépassé')
+        throw new Error('OpenAI whisper-1: délai dépassé')
       }
       throw err
     } finally {
@@ -161,7 +127,7 @@ export class OpenRouterService {
     try {
       data = JSON.parse(body) as typeof data
     } catch {
-      throw new Error(`OpenRouter transcription illisible (HTTP ${res.status})`)
+      throw new Error(`Transcription audio illisible (HTTP ${res.status})`)
     }
     if (!res.ok) {
       throw new Error(data.error?.message || `Transcription audio impossible (HTTP ${res.status})`)
@@ -186,4 +152,4 @@ function normalizeMessageContent(
   return ''
 }
 
-export const openRouterService = new OpenRouterService()
+export const openAiService = new OpenAiService()

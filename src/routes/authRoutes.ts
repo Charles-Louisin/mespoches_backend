@@ -82,6 +82,7 @@ const registerSchema = Joi.object({
 const updateMeSchema = Joi.object({
   currency: Joi.string().valid(...CURRENCY_VALUES),
   hidePlannedExpensesHelp: Joi.boolean(),
+  name: Joi.string().trim().min(2).max(NAME_MAX_LENGTH),
 });
 
 const loginSchema = Joi.object({
@@ -630,6 +631,20 @@ router.patch('/me', protect, async (req: Request, res: Response) => {
     }
 
     const user = req.user!;
+    if (value.name) {
+      const name = String(value.name).trim();
+      const taken = await User.exists({
+        _id: { $ne: user._id },
+        name: { $regex: new RegExp(`^${escapeRegex(name)}$`, 'i') },
+      });
+      if (taken) {
+        return res.status(409).json({
+          success: false,
+          message: 'Ce nom est déjà utilisé',
+        });
+      }
+      user.name = name;
+    }
     if (value.currency) {
       user.currency = value.currency;
       await Wallet.updateMany(
@@ -641,7 +656,7 @@ router.patch('/me', protect, async (req: Request, res: Response) => {
       user.hidePlannedExpensesHelp = value.hidePlannedExpensesHelp;
     }
 
-    if (value.currency || value.hidePlannedExpensesHelp !== undefined) {
+    if (value.currency || value.hidePlannedExpensesHelp !== undefined || value.name) {
       await user.save();
     }
 

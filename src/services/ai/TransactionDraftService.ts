@@ -159,6 +159,7 @@ export class TransactionDraftService {
     spokenText: string
     transactions: AiVoiceTransaction[]
     warning?: string
+    fromParser?: boolean
   }): Promise<IPendingTransaction[]> {
     const created: IPendingTransaction[] = []
     for (const tx of params.transactions) {
@@ -189,7 +190,7 @@ export class TransactionDraftService {
         category_id: placement.category_id,
         confidence: tx.confidence,
         pattern: 'unknown',
-        ai_enriched: true,
+        ai_enriched: !params.fromParser,
         document_type: 'voice_note',
         low_confidence_warning: params.warning,
         ai_items: lineItems,

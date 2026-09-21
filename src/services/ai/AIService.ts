@@ -1,6 +1,7 @@
 import { TEXT_MODELS, VISION_MODELS } from '../../config/aiModels'
-import { extractJsonObject, formatAiError } from './aiLogger'
+import { extractJsonObject, formatAiError, isRetryableOpenRouterError } from './aiLogger'
 import { modelFallbackService, ModelFallbackService } from './ModelFallbackService'
+import { openAiService } from './OpenAiService'
 import { openRouterService } from './OpenRouterService'
 import { promptBuilder, PromptBuilder } from './PromptBuilder'
 import type {
@@ -73,6 +74,20 @@ export class AIService {
     modality: 'vision' | 'text'
     messages: OpenRouterChatMessage[]
   }): Promise<{ json: unknown; model: string; confidence?: number }> {
+    if (openAiService.isConfigured()) {
+      try {
+        const result = await openAiService.chatCompletion({
+          model: process.env.OPENAI_CHAT_MODEL?.trim() || 'gpt-4o-mini',
+          messages: params.messages,
+        })
+        const raw = extractJsonObject(result.content)
+        if (!raw) throw new Error('Réponse IA illisible (JSON attendu)')
+        return { json: JSON.parse(raw), model: result.model }
+      } catch (err) {
+        if (!isRetryableOpenRouterError(err)) throw err
+      }
+    }
+
     const models = params.modality === 'vision' ? VISION_MODELS : TEXT_MODELS
     const result = await this.fallback.completeWithFallback({
       purpose: params.purpose,
@@ -113,6 +128,13 @@ export class AIService {
   }
 
   async transcribeAudio(base64: string, mimeType: string): Promise<string> {
+    if (openAiService.isConfigured()) {
+      try {
+        return await openAiService.transcribeAudio(base64, mimeType)
+      } catch (err) {
+        if (!isRetryableOpenRouterError(err)) throw err
+      }
+    }
     return openRouterService.transcribeAudio(base64, mimeType)
   }
 

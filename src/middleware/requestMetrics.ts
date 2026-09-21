@@ -74,7 +74,11 @@ export function requestMetrics(req: Request, res: Response, next: NextFunction):
 
 /** Coupe les requêtes trop longues côté client (la query Mongo a aussi maxTimeMS). */
 export function requestTimeout(req: Request, res: Response, next: NextFunction): void {
-  const ms = Number(process.env.REQUEST_TIMEOUT_MS || 20_000);
+  const path = (req.originalUrl || req.url || '').split('?')[0]
+  const longAi = /\/ai-scan$|\/voice-note$/.test(path)
+  const ms = longAi
+    ? Number(process.env.AI_REQUEST_TIMEOUT_MS || 90_000)
+    : Number(process.env.REQUEST_TIMEOUT_MS || 20_000)
   req.setTimeout(ms);
   res.setTimeout(ms, () => {
     if (res.headersSent) return;
