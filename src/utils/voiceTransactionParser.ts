@@ -41,13 +41,38 @@ const WORD_NUMBERS: Record<string, number> = {
   milles: 1000,
 }
 
-const INCOME_RE =
-  /\b(recu|recue|recois|salaire|gagne|verse|credit[e]?|m['’]a\s+envoye|on m['’]a\s+(donne|verse|paye)|rentree|revenu|depot|ajoute|encaisse)\b/i
+const INCOME_RES: RegExp[] = [
+  /\b(recu|recue|recevoir|recois|recoit|reception)\b/i,
+  /\b(salaire|prime|bonus)\b/i,
+  /\b(gagne|gagner)\b/i,
+  /\b(versement|verse|verser)\b/i,
+  /\b(credite|crediter)\b/i,
+  /\bm['’ ]?a\s+(envoye|donne|verse|paye|transfere)/i,
+  /\bon m['’ ]?a\s+(donne|verse|paye|envoye|transfere)/i,
+  /\b(rentree|revenu|depot|deposer|encaisse|encaisser)\b/i,
+  /\b(vendu|vendre|vente)\b/i,
+  /\b(rembourse|remboursement)\b/i,
+  /\bentree d['’]?argent\b/i,
+  /\bc['’]est un revenu\b/i,
+]
 
-const EXPENSE_RE =
-  /\b(paye|achete|depense|envoye|vire|retire|regle|facture|donne|pris|coute|sortie|achat|paiement|retrait)\b/i
+const EXPENSE_RES: RegExp[] = [
+  /\b(paye|payer|paiement|payes)\b/i,
+  /\b(achete|acheter|achat)\b/i,
+  /\b(depense|depenser)\b/i,
+  /\b(envoye|envoyer)\b/i,
+  /\b(vire|virer)\b/i,
+  /\b(retire|retirer|retrait)\b/i,
+  /\b(regle|regler)\b/i,
+  /\b(facture|facturer)\b/i,
+  /\bj['’]ai\s+(donne|pris)\b/i,
+  /\b(coute|couter)\b/i,
+]
 
 const CANCEL_RE = /\b(annule|annuler|oublie|laisse\s+tomber|cancel)\b/i
+
+const INCOME_HINT = /\b(salaire|paie|prime|bonus)\b/i
+const EXPENSE_HINT = /\b(taxi|okada|moto|essence|marche|loyer|pain|restaurant|courses|pharmacie)\b/i
 
 const CATEGORIES: Array<{ hint: string; re: RegExp }> = [
   { hint: 'Transport', re: /\b(taxi|moto|okada|bus|carburant|essence|transport|uber|course)\b/i },
@@ -216,6 +241,36 @@ function extractDate(text: string): string | null {
   return null
 }
 
+function firstIndex(text: string, patterns: RegExp[]): number {
+  let best = Infinity
+  for (const re of patterns) {
+    const m = text.match(re)
+    if (m && typeof m.index === 'number' && m.index < best) best = m.index
+  }
+  return best
+}
+
+function detectType(folded: string): { type: 'income' | 'expense'; score: number } {
+  let incomeAt = firstIndex(folded, INCOME_RES)
+  let expenseAt = firstIndex(folded, EXPENSE_RES)
+  if (!Number.isFinite(incomeAt) && INCOME_HINT.test(folded)) {
+    incomeAt = folded.search(INCOME_HINT)
+  }
+  if (!Number.isFinite(expenseAt) && EXPENSE_HINT.test(folded)) {
+    expenseAt = folded.search(EXPENSE_HINT)
+  }
+  if (!Number.isFinite(incomeAt) && !Number.isFinite(expenseAt)) {
+    return { type: 'expense', score: 0.35 }
+  }
+  if (Number.isFinite(incomeAt) && (!Number.isFinite(expenseAt) || incomeAt < expenseAt)) {
+    return { type: 'income', score: Number.isFinite(expenseAt) ? 0.7 : 0.94 }
+  }
+  if (Number.isFinite(expenseAt) && (!Number.isFinite(incomeAt) || expenseAt < incomeAt)) {
+    return { type: 'expense', score: Number.isFinite(incomeAt) ? 0.7 : 0.94 }
+  }
+  return { type: 'expense', score: 0.35 }
+}
+
 function extractCategory(text: string): string | null {
   const folded = fold(text)
   for (const cat of CATEGORIES) {
@@ -279,20 +334,7 @@ export function parseVoiceNote(spoken: string): VoiceParseResult {
   let amount = found?.amount ?? null
   amount = applyCorrections(text, amount)
 
-  const income = INCOME_RE.test(folded)
-  const expense = EXPENSE_RE.test(folded)
-  let type: 'income' | 'expense' = 'expense'
-  let typeScore = 0.35
-  if (income && !expense) {
-    type = 'income'
-    typeScore = 0.92
-  } else if (expense && !income) {
-    type = 'expense'
-    typeScore = 0.92
-  } else if (income && expense) {
-    type = /\b(mais|ensuite|et aussi)\b/i.test(text) ? 'expense' : 'expense'
-    typeScore = 0.6
-  }
+  const { type, score: typeScore } = detectType(folded)
 
   const category = extractCategory(text)
   const who = extractCounterparty(text)
@@ -302,7 +344,7 @@ export function parseVoiceNote(spoken: string): VoiceParseResult {
   let confidence = 0
   if (amount && typeScore >= 0.9) confidence = HIGH
   else if (amount && typeScore >= 0.6) confidence = 0.72
-  else if (amount) confidence = MEDIUM
+  else if (amount) confidence = 0.4
   else if (typeScore >= 0.9) confidence = 0.35
   else confidence = 0.15
 

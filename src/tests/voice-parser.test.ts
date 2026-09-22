@@ -59,4 +59,31 @@ describe('Parser vocal français', () => {
     const p = parseVoiceNote('annule')
     assert.equal(p.detected, false)
   })
+
+  it('infinitifs STT : payer / acheter', () => {
+    const a = parseVoiceNote("j'ai payer le taxi 1500")
+    assert.equal(a.type, 'expense')
+    assert.equal(a.amount, 1500)
+    const b = parseVoiceNote("j'ai acheter du pain 500")
+    assert.equal(b.type, 'expense')
+    assert.equal(b.amount, 500)
+  })
+
+  it('on m’a donné → revenu', () => {
+    const p = parseVoiceNote("on m'a donné 10000")
+    assert.equal(p.type, 'income')
+    assert.equal(p.amount, 10000)
+  })
+
+  it('crédit téléphone n’est pas un revenu', () => {
+    const p = parseVoiceNote("j'ai payé crédit téléphone 1000")
+    assert.equal(p.type, 'expense')
+    assert.equal(p.amount, 1000)
+  })
+
+  it('j’ai vendu → revenu', () => {
+    const p = parseVoiceNote("j'ai vendu 20000")
+    assert.equal(p.type, 'income')
+    assert.equal(p.amount, 20000)
+  })
 })
