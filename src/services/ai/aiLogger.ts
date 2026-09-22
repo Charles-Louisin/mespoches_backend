@@ -82,9 +82,8 @@ export function formatAiError(err: unknown): string {
     return 'Service d’analyse momentanément indisponible. Réessayez plus tard.'
   }
   if (
-    /aucun mot reconnu|audio vide|rien de lisible dans l[’']audio|transcription audio|note vocale/i.test(
-      lower
-    )
+    /aucun mot reconnu|audio vide|rien de lisible dans l[’']audio/i.test(lower) &&
+    !/transaction|note vocale/i.test(lower)
   ) {
     return 'Rien de lisible dans l’audio. Parlez plus clairement et réessayez.'
   }
