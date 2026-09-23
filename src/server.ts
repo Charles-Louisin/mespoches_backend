@@ -20,6 +20,7 @@ import plannedExpenseRoutes from './routes/plannedExpenseRoutes';
 import pendingTransactionRoutes from './routes/pendingTransactionRoutes';
 import uploadRoutes from './routes/uploadRoutes';
 import telemetryRoutes from './routes/telemetryRoutes';
+import feedbackRoutes from './routes/feedbackRoutes';
 import { startPlannedExpenseScheduler } from './jobs/plannedExpenseScheduler';
 import {
   getCinetPayEnvironment,
@@ -200,6 +201,7 @@ app.use('/api/planned-expenses', plannedExpenseRoutes);
 app.use('/api/pending-transactions', pendingTransactionRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/telemetry', telemetryRoutes);
+app.use('/api/feedback', feedbackRoutes);
 
 app.use(
   (

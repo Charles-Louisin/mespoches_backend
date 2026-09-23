@@ -11,7 +11,8 @@
     "perf:explain": "tsx perf/explain-indexes.ts",
     "perf:health": "k6 run perf/k6/health.js",
     "perf:journey": "k6 run perf/k6/journey.js",
-    "perf:upload": "k6 run perf/k6/upload.js"
+    "perf:upload": "k6 run perf/k6/upload.js",
+    "db:wipe": "tsx src/scripts/wipe-database.ts"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

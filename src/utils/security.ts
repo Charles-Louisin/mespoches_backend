@@ -164,6 +164,21 @@ export const parseIngestLimiter = rateLimit({
   },
 });
 
+export const feedbackLimiter = rateLimit({
+  ...rateLimitBase,
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  keyGenerator: (req) => {
+    const uid = req.user?._id ? String(req.user._id) : clientIp(req);
+    return `feedback:${uid}`;
+  },
+  message: {
+    success: false,
+    code: 'RATE_LIMITED',
+    message: 'Trop de messages. Réessayez dans une heure.',
+  },
+});
+
 export const telemetryLimiter = rateLimit({
   ...rateLimitBase,
   windowMs: 15 * 60 * 1000,

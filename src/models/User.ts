@@ -29,6 +29,7 @@ export interface IUser extends Document {
   name?: string;
   currency: string;
   hidePlannedExpensesHelp: boolean;
+  expoPushToken: string | null;
   lastLoginAt: Date | null;
   loginHistory: ILoginHistoryEntry[];
   /** Incrémente pour invalider tous les JWT existants (logout, compromission, liaison Google). */
@@ -122,6 +123,11 @@ const userSchema = new Schema<IUser>(
     hidePlannedExpensesHelp: {
       type: Boolean,
       default: false,
+    },
+    expoPushToken: {
+      type: String,
+      default: null,
+      trim: true,
     },
     lastLoginAt: {
       type: Date,

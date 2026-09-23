@@ -15,6 +15,7 @@ import PendingTransaction from '../models/PendingTransaction';
 import SmsHabit from '../models/SmsHabit';
 import NotificationPattern from '../models/NotificationPattern';
 import SubscriptionPayment from '../models/SubscriptionPayment';
+import FeedbackMessage from '../models/FeedbackMessage';
 import { invalidateUserCache, protect } from '../middleware/auth';
 import { sendExistingAccountEmail } from '../utils/email';
 import { toPublicUser } from '../utils/userPayload';
@@ -689,6 +690,7 @@ router.delete('/me', protect, async (req: Request, res: Response) => {
       SmsHabit.deleteMany({ user_id: userId }),
       NotificationPattern.deleteMany({ user_id: userId }),
       SubscriptionPayment.deleteMany({ user_id: userId }),
+      FeedbackMessage.deleteMany({ user_id: userId }),
       User.deleteOne({ _id: userId }),
     ]);
 
