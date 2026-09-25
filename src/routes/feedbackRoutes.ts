@@ -3,7 +3,7 @@ import Joi from 'joi';
 import mongoose from 'mongoose';
 import FeedbackMessage from '../models/FeedbackMessage';
 import User from '../models/User';
-import { protect, adminOnly } from '../middleware/auth';
+import { invalidateUserCache, protect, adminOnly } from '../middleware/auth';
 import { feedbackLimiter } from '../utils/security';
 import { notifyAdminsOfFeedback, notifyUserOfAdminReply } from '../utils/expoPush';
 
@@ -44,13 +44,72 @@ router.post('/push-token', async (req: Request, res: Response) => {
     if (error) {
       return res.status(400).json({ success: false, message: 'Jeton de notification invalide' });
     }
-    const user = req.user!;
-    user.expoPushToken = value.token.trim();
-    await user.save();
+    const token = value.token.trim();
+    await User.findByIdAndUpdate(req.user!._id, { expoPushToken: token });
+    invalidateUserCache(String(req.user!._id));
     return res.json({ success: true, data: { ok: true } });
   } catch (err) {
     console.error('feedback push-token:', err);
     return res.status(500).json({ success: false, message: 'Enregistrement du jeton impossible' });
+  }
+});
+
+router.get('/inbox-ping', async (req: Request, res: Response) => {
+  try {
+    const me = req.user!;
+    if (me.role === 'admin') {
+      const rows = await FeedbackMessage.aggregate([
+        { $match: { from: 'user', read_at: null } },
+        { $sort: { created_at: -1 } },
+        {
+          $group: {
+            _id: '$user_id',
+            preview: { $first: '$body' },
+            lastAt: { $first: '$created_at' },
+            unread: { $sum: 1 },
+          },
+        },
+        { $sort: { lastAt: -1 } },
+        { $limit: 1 },
+      ]);
+      const row = rows[0];
+      const unread = row?.unread ?? 0;
+      return res.json({
+        success: true,
+        data: {
+          role: 'admin',
+          unread,
+          preview: unread ? previewOf(String(row.preview || '')) : '',
+          userId: row?._id ? String(row._id) : '',
+          lastAt: row?.lastAt ? new Date(row.lastAt).toISOString() : '',
+        },
+      });
+    }
+
+    const [unread, last] = await Promise.all([
+      FeedbackMessage.countDocuments({
+        user_id: me._id,
+        from: 'admin',
+        read_at: null,
+      }),
+      FeedbackMessage.findOne({ user_id: me._id, from: 'admin' })
+        .sort({ created_at: -1 })
+        .select('body created_at')
+        .lean(),
+    ]);
+    return res.json({
+      success: true,
+      data: {
+        role: 'user',
+        unread,
+        preview: unread && last?.body ? previewOf(last.body) : '',
+        userId: String(me._id),
+        lastAt: last?.created_at ? new Date(last.created_at).toISOString() : '',
+      },
+    });
+  } catch (err) {
+    console.error('feedback inbox-ping:', err);
+    return res.status(500).json({ success: false, message: 'Impossible de vérifier la messagerie' });
   }
 });
 
@@ -59,6 +118,10 @@ router.get('/me', async (req: Request, res: Response) => {
     const list = await FeedbackMessage.find({ user_id: req.user!._id })
       .sort({ created_at: 1 })
       .lean();
+    await FeedbackMessage.updateMany(
+      { user_id: req.user!._id, from: 'admin', read_at: null },
+      { $set: { read_at: new Date() } }
+    );
     return res.json({ success: true, data: list });
   } catch (err) {
     console.error('feedback me:', err);

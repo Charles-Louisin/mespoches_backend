@@ -1,4 +1,4 @@
-import type { AiModelConfig } from '../../config/aiModels'
+import { isFreeOpenRouterModel, type AiModelConfig } from '../../config/aiModels'
 import { logAiCall, isRetryableOpenRouterError, sleep } from './aiLogger'
 import { openRouterService, OpenRouterService } from './OpenRouterService'
 import type { OpenRouterChatMessage, OpenRouterCompletionResult } from './types'
@@ -24,16 +24,17 @@ export class ModelFallbackService {
     /** Si fourni, une exception = contenu inutilisable → modèle suivant. */
     validateContent?: (content: string) => void
   }): Promise<FallbackResult> {
-    if (!params.models.length) {
-      throw new Error('Aucun modèle IA configuré')
+    const models = params.models.filter((m) => !isFreeOpenRouterModel(m.id))
+    if (!models.length) {
+      throw new Error('Aucun modèle IA payant configuré')
     }
 
     const attemptedModels: string[] = []
     let lastError: Error | null = null
     let fallbackReason: string | undefined
 
-    for (let i = 0; i < params.models.length; i++) {
-      const model = params.models[i]
+    for (let i = 0; i < models.length; i++) {
+      const model = models[i]
       attemptedModels.push(model.id)
 
       for (let attempt = 0; attempt < 2; attempt++) {

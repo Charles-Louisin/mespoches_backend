@@ -13,6 +13,7 @@ import {
 import { getSmsHabitsSummary } from '../services/smsHabitService';
 import { analyzeSmsRecurrences } from '../utils/geminiSmsLearning';
 import { aiService, formatAiError } from '../services/ai';
+import { notifyUserOfPendingTransaction } from '../utils/expoPush';
 import { aiScanLimiter, parseIngestLimiter, MAX_PARSE_TEXT_CHARS } from '../utils/security';
 import { parseListPage, listMeta } from '../utils/pagination';
 import {
@@ -287,6 +288,11 @@ router.post('/parse-sms', parseIngestLimiter, async (req: Request, res: Response
       return;
     }
 
+    void notifyUserOfPendingTransaction({
+      userId: String(req.user!._id),
+      description: created.item?.description || 'SMS Mobile Money',
+      amount: created.item?.amount,
+    });
     res.status(201).json({ success: true, data: created.item, duplicate: false });
   } catch {
     res.status(500).json({
@@ -332,6 +338,11 @@ router.post('/parse-notification', parseIngestLimiter, async (req: Request, res:
       return;
     }
 
+    void notifyUserOfPendingTransaction({
+      userId: String(req.user!._id),
+      description: created.item?.description || 'Notification Mobile Money',
+      amount: created.item?.amount,
+    });
     res.status(201).json({ success: true, data: created.item, duplicate: false });
   } catch {
     res.status(500).json({

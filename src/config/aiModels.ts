@@ -1,8 +1,6 @@
 /**
- * Configuration des modèles OpenRouter.
- * Modifiable via variables d'environnement ou en éditant ces listes.
- *
- * IDs vérifiés sur https://openrouter.ai/api/v1/models (tier :free).
+ * Configuration des modèles OpenRouter — payants uniquement.
+ * Les IDs `:free` sont ignorés (quotas, souvent down, 0 crédit débité).
  */
 
 export type AiModelConfig = {
@@ -12,60 +10,68 @@ export type AiModelConfig = {
   modality: 'vision' | 'text' | 'both'
 }
 
-/** Ordre de fallback Vision (analyse d'images) — modèles gratuits OpenRouter vivants. */
-export const VISION_MODELS: AiModelConfig[] = [
-  {
-    id: process.env.OPENROUTER_VISION_MODEL_1 || 'google/gemma-4-31b-it:free',
-    label: 'Gemma 4 31B',
-    modality: 'both',
-  },
-  {
-    id: process.env.OPENROUTER_VISION_MODEL_2 || 'google/gemma-4-26b-a4b-it:free',
-    label: 'Gemma 4 26B',
-    modality: 'both',
-  },
-  {
-    id: process.env.OPENROUTER_VISION_MODEL_3 || 'nvidia/nemotron-nano-12b-v2-vl:free',
-    label: 'Nemotron Nano VL',
-    modality: 'vision',
-  },
-  {
-    id:
-      process.env.OPENROUTER_VISION_MODEL_4 ||
-      'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
-    label: 'Nemotron Omni',
-    modality: 'vision',
-  },
-  {
-    id: process.env.OPENROUTER_VISION_MODEL_5 || 'openrouter/free',
-    label: 'OpenRouter Free Router',
-    modality: 'both',
-  },
-]
+const PAID_VISION_DEFAULTS = [
+  'google/gemini-2.5-flash',
+  'openai/gpt-4o-mini',
+  'google/gemini-2.0-flash-001',
+] as const
 
-/** Ordre de fallback texte (notifications / SMS). */
-export const TEXT_MODELS: AiModelConfig[] = [
-  {
-    id: process.env.OPENROUTER_TEXT_MODEL_1 || 'google/gemma-4-31b-it:free',
-    label: 'Gemma 4 31B',
-    modality: 'both',
-  },
-  {
-    id: process.env.OPENROUTER_TEXT_MODEL_2 || 'openai/gpt-oss-20b:free',
-    label: 'GPT-OSS 20B',
-    modality: 'text',
-  },
-  {
-    id: process.env.OPENROUTER_TEXT_MODEL_3 || 'nvidia/nemotron-3-nano-30b-a3b:free',
-    label: 'Nemotron Nano 30B',
-    modality: 'text',
-  },
-  {
-    id: process.env.OPENROUTER_TEXT_MODEL_4 || 'openrouter/free',
-    label: 'OpenRouter Free Router',
-    modality: 'text',
-  },
-]
+const PAID_TEXT_DEFAULTS = [
+  'openai/gpt-4o-mini',
+  'google/gemini-2.5-flash',
+  'google/gemini-2.0-flash-001',
+] as const
+
+export function isFreeOpenRouterModel(id: string): boolean {
+  const n = id.trim().toLowerCase()
+  return n.endsWith(':free') || n === 'openrouter/free' || n.includes('/free')
+}
+
+function paidModelId(raw: string | undefined, fallback: string): string {
+  const id = (raw || '').trim()
+  if (!id || isFreeOpenRouterModel(id)) return fallback
+  return id
+}
+
+function buildPaidModels(
+  envKeys: string[],
+  defaults: readonly string[],
+  modality: AiModelConfig['modality']
+): AiModelConfig[] {
+  const seen = new Set<string>()
+  const out: AiModelConfig[] = []
+  defaults.forEach((fallback, i) => {
+    const id = paidModelId(process.env[envKeys[i]], fallback)
+    if (seen.has(id)) return
+    seen.add(id)
+    out.push({ id, label: id, modality })
+  })
+  return out
+}
+
+/** Ordre de fallback Vision (scan ticket) — modèles payants. */
+export const VISION_MODELS: AiModelConfig[] = buildPaidModels(
+  [
+    'OPENROUTER_VISION_MODEL_1',
+    'OPENROUTER_VISION_MODEL_2',
+    'OPENROUTER_VISION_MODEL_3',
+  ],
+  PAID_VISION_DEFAULTS,
+  'both'
+)
+
+/** Ordre de fallback texte (SMS / notifications / voix). */
+export const TEXT_MODELS: AiModelConfig[] = buildPaidModels(
+  ['OPENROUTER_TEXT_MODEL_1', 'OPENROUTER_TEXT_MODEL_2', 'OPENROUTER_TEXT_MODEL_3'],
+  PAID_TEXT_DEFAULTS,
+  'text'
+)
+
+export const OPENROUTER_WHISPER_MODEL = (() => {
+  const raw = process.env.OPENROUTER_WHISPER_MODEL?.trim()
+  if (raw && !isFreeOpenRouterModel(raw)) return raw
+  return 'openai/whisper-large-v3'
+})()
 
 /** Seuil en dessous duquel on signale une faible confiance à l'utilisateur. */
 export const LOW_CONFIDENCE_THRESHOLD = 0.75

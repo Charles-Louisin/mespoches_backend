@@ -74,7 +74,8 @@ export class AIService {
     modality: 'vision' | 'text'
     messages: OpenRouterChatMessage[]
   }): Promise<{ json: unknown; model: string; confidence?: number }> {
-    if (openAiService.isConfigured()) {
+    const useOpenRouter = Boolean(process.env.OPENROUTER_API_KEY?.trim())
+    if (!useOpenRouter && openAiService.isConfigured()) {
       try {
         const result = await openAiService.chatCompletion({
           model: process.env.OPENAI_CHAT_MODEL?.trim() || 'gpt-4o-mini',
@@ -128,7 +129,8 @@ export class AIService {
   }
 
   async transcribeAudio(base64: string, mimeType: string): Promise<string> {
-    if (openAiService.isConfigured()) {
+    const useOpenRouter = Boolean(process.env.OPENROUTER_API_KEY?.trim())
+    if (!useOpenRouter && openAiService.isConfigured()) {
       try {
         return await openAiService.transcribeAudio(base64, mimeType)
       } catch (err) {

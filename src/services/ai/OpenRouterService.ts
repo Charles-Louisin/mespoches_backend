@@ -2,6 +2,7 @@ import {
   OPENROUTER_APP_NAME,
   OPENROUTER_BASE_URL,
   OPENROUTER_SITE_URL,
+  OPENROUTER_WHISPER_MODEL,
 } from '../../config/aiModels'
 import type { OpenRouterChatMessage, OpenRouterCompletionResult } from './types'
 
@@ -123,7 +124,7 @@ export class OpenRouterService {
         : mimeType.includes('mpeg') || mimeType.includes('mp3')
           ? 'mp3'
           : 'm4a'
-    const model = process.env.OPENROUTER_WHISPER_MODEL?.trim() || 'openai/whisper-large-v3'
+    const model = OPENROUTER_WHISPER_MODEL
     const form = new FormData()
     form.append(
       'file',

@@ -7,21 +7,34 @@ export async function notifyExpoPush(params: {
   title: string;
   body: string;
   data?: Record<string, string>;
+  channelId?: string;
 }): Promise<void> {
-  const tokens = [...new Set(params.tokens.filter((t) => t.startsWith('ExponentPushToken')))];
-  if (!tokens.length) return;
+  const tokens = [
+    ...new Set(
+      params.tokens.filter(
+        (t) =>
+          typeof t === 'string' &&
+          (t.startsWith('ExponentPushToken') || t.startsWith('ExpoPushToken'))
+      )
+    ),
+  ];
+  if (!tokens.length) {
+    console.warn('[Expo push] aucun jeton enregistré');
+    return;
+  }
 
   const messages = tokens.map((to) => ({
     to,
     title: params.title,
     body: params.body.replace(/\s+/g, ' ').trim().slice(0, 180),
     sound: 'default',
-    channelId: 'mes_poches_messages',
+    priority: 'high',
+    channelId: params.channelId || 'mes_poches_messages',
     data: params.data ?? {},
   }));
 
   try {
-    await fetch(EXPO_PUSH_URL, {
+    const res = await fetch(EXPO_PUSH_URL, {
       method: 'POST',
       headers: {
         Accept: 'application/json',
@@ -29,6 +42,10 @@ export async function notifyExpoPush(params: {
       },
       body: JSON.stringify(messages),
     });
+    const raw = await res.text();
+    if (!res.ok || /"status"\s*:\s*"error"/i.test(raw)) {
+      console.error('[Expo push]', res.status, raw.slice(0, 400));
+    }
   } catch (err) {
     console.error('Expo push:', err instanceof Error ? err.message : err);
   }
@@ -66,6 +83,26 @@ export async function notifyUserOfAdminReply(params: {
     tokens: [user.expoPushToken],
     title: 'Réponse de Mes Poches',
     body: params.preview,
-    data: { type: 'feedback-reply' },
+    data: { type: 'feedback-reply', screen: 'feedback' },
+  });
+}
+
+export async function notifyUserOfPendingTransaction(params: {
+  userId: string;
+  description: string;
+  amount?: number;
+}): Promise<void> {
+  const user = await User.findById(params.userId).select('expoPushToken').lean();
+  if (!user?.expoPushToken) return;
+  const amount =
+    typeof params.amount === 'number' && params.amount > 0
+      ? ` — ${Math.round(params.amount)} FCFA`
+      : '';
+  await notifyExpoPush({
+    tokens: [user.expoPushToken],
+    title: 'Transaction à valider',
+    body: `${params.description || 'Transaction Mobile Money'}${amount}`,
+    channelId: 'mes_poches_transactions',
+    data: { type: 'pending', screen: 'pending' },
   });
 }
