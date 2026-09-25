@@ -88,6 +88,15 @@ export async function protect(
         return;
       }
 
+      if (user.suspendedAt) {
+        res.status(403).json({
+          success: false,
+          code: 'ACCOUNT_SUSPENDED',
+          message: 'Ce compte a été suspendu. Contactez le support.',
+        });
+        return;
+      }
+
       await syncExpiredPremium(user);
 
       req.user = user as IUser;

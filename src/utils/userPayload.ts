@@ -19,5 +19,6 @@ export function toPublicUser(user: IUser) {
     hidePlannedExpensesHelp: !!user.hidePlannedExpensesHelp,
     created_at: user.created_at,
     lastLoginAt: user.lastLoginAt || null,
+    suspended: Boolean(user.suspendedAt),
   };
 }

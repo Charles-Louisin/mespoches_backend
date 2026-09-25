@@ -7,7 +7,14 @@ import AnalyticsEvent from '../models/AnalyticsEvent';
 import { protect, adminOnly } from '../middleware/auth';
 import { buildAdminInsights, buildTelemetryOverview } from '../services/adminInsights';
 import { listCohort } from '../services/adminCohorts';
+import {
+  purgeUserAccount,
+  revokeUserPremium,
+  setUserSuspended,
+} from '../services/adminUserActions';
 import { parseListPage, listMeta } from '../utils/pagination';
+import { toPublicUser } from '../utils/userPayload';
+import type { IUser } from '../models/User';
 
 const router = Router();
 
@@ -103,6 +110,7 @@ router.get('/users', protect, adminOnly, async (req: Request, res: Response) => 
         lastLoginAt: user.lastLoginAt,
         plan: user.plan,
         premiumSource: user.premiumSource,
+        suspended: Boolean(user.suspendedAt),
         emailVerified: user.emailVerified,
         authProvider: user.authProvider,
         walletsCount: w?.walletsCount || 0,
@@ -180,6 +188,99 @@ router.get('/users/:id', protect, adminOnly, async (req: Request, res: Response)
     return res.status(500).json({
       success: false,
       message: "Erreur lors de la récupération des informations de l'utilisateur",
+    });
+  }
+});
+
+function targetGuard(actor: IUser, target: IUser | null): string | null {
+  if (!target) return 'Utilisateur introuvable';
+  if (target.role === 'admin') return 'Action interdite sur un compte administrateur';
+  if (String(target._id) === String(actor._id)) {
+    return 'Vous ne pouvez pas modifier votre propre compte';
+  }
+  return null;
+}
+
+router.post('/users/:id/make-free', protect, adminOnly, async (req: Request, res: Response) => {
+  try {
+    const user = await User.findById(req.params.id);
+    const blocked = targetGuard(req.user as IUser, user);
+    if (blocked || !user) {
+      return res.status(blocked === 'Utilisateur introuvable' ? 404 : 400).json({
+        success: false,
+        message: blocked || 'Utilisateur introuvable',
+      });
+    }
+    await revokeUserPremium(user);
+    return res.json({ success: true, data: { user: toPublicUser(user) } });
+  } catch (error) {
+    console.error('Erreur admin make-free:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Impossible de passer ce compte en gratuit',
+    });
+  }
+});
+
+router.post('/users/:id/suspend', protect, adminOnly, async (req: Request, res: Response) => {
+  try {
+    const user = await User.findById(req.params.id);
+    const blocked = targetGuard(req.user as IUser, user);
+    if (blocked || !user) {
+      return res.status(blocked === 'Utilisateur introuvable' ? 404 : 400).json({
+        success: false,
+        message: blocked || 'Utilisateur introuvable',
+      });
+    }
+    await setUserSuspended(user, true);
+    return res.json({ success: true, data: { user: toPublicUser(user) } });
+  } catch (error) {
+    console.error('Erreur admin suspend:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Impossible de suspendre ce compte',
+    });
+  }
+});
+
+router.post('/users/:id/unsuspend', protect, adminOnly, async (req: Request, res: Response) => {
+  try {
+    const user = await User.findById(req.params.id);
+    const blocked = targetGuard(req.user as IUser, user);
+    if (blocked || !user) {
+      return res.status(blocked === 'Utilisateur introuvable' ? 404 : 400).json({
+        success: false,
+        message: blocked || 'Utilisateur introuvable',
+      });
+    }
+    await setUserSuspended(user, false);
+    return res.json({ success: true, data: { user: toPublicUser(user) } });
+  } catch (error) {
+    console.error('Erreur admin unsuspend:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Impossible de réactiver ce compte',
+    });
+  }
+});
+
+router.delete('/users/:id', protect, adminOnly, async (req: Request, res: Response) => {
+  try {
+    const user = await User.findById(req.params.id);
+    const blocked = targetGuard(req.user as IUser, user);
+    if (blocked || !user) {
+      return res.status(blocked === 'Utilisateur introuvable' ? 404 : 400).json({
+        success: false,
+        message: blocked || 'Utilisateur introuvable',
+      });
+    }
+    await purgeUserAccount(user._id.toString());
+    return res.json({ success: true, data: { deleted: true } });
+  } catch (error) {
+    console.error('Erreur admin delete user:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Impossible de supprimer ce compte',
     });
   }
 });

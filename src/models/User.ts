@@ -34,6 +34,8 @@ export interface IUser extends Document {
   loginHistory: ILoginHistoryEntry[];
   /** Incrémente pour invalider tous les JWT existants (logout, compromission, liaison Google). */
   tokenVersion: number;
+  /** Compte bloqué par un admin : plus de connexion ni d’API. */
+  suspendedAt: Date | null;
   created_at: Date;
   comparePassword(candidatePassword: string): Promise<boolean>;
 }
@@ -144,6 +146,10 @@ const userSchema = new Schema<IUser>(
       type: Number,
       default: 0,
       min: 0,
+    },
+    suspendedAt: {
+      type: Date,
+      default: null,
     },
     created_at: {
       type: Date,

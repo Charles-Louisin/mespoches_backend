@@ -337,6 +337,14 @@ router.post('/login', loginLimiter, async (req: Request, res: Response) => {
       });
     }
 
+    if (user.suspendedAt) {
+      return res.status(403).json({
+        success: false,
+        code: 'ACCOUNT_SUSPENDED',
+        message: 'Ce compte a été suspendu. Contactez le support.',
+      });
+    }
+
     // Si Google est aussi lié, marquer le compte comme double auth
     if (user.googleId && user.authProvider === 'email') {
       user.authProvider = 'both';
@@ -884,6 +892,17 @@ async function completeGoogleLogin(
     if (name && !user.name) {
       user.name = name;
     }
+  }
+
+  if (user.suspendedAt) {
+    return {
+      status: 403,
+      body: {
+        success: false,
+        code: 'ACCOUNT_SUSPENDED',
+        message: 'Ce compte a été suspendu. Contactez le support.',
+      },
+    };
   }
 
   recordLogin(user, req);
