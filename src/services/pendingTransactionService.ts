@@ -6,7 +6,7 @@ import {
   parseMobileMoneySms,
   ParsedMobileMoney,
 } from '../utils/mobileMoneySmsParser';
-import { parseVoiceNote, VOICE_PARSE_HIGH, VOICE_PARSE_MEDIUM } from '../utils/voiceTransactionParser';
+import { parseVoiceNote } from '../utils/voiceTransactionParser';
 import {
   applyHabitsAndAi,
   getUserSmsIdentity,
@@ -308,37 +308,6 @@ export async function createFromVoiceNote(
   }
 
   const parsed = parseVoiceNote(text);
-  if (parsed.detected && parsed.amount && parsed.confidence >= VOICE_PARSE_MEDIUM) {
-    const warning =
-      parsed.confidence < VOICE_PARSE_HIGH
-        ? "Certaines informations n'ont pas pu être reconnues avec certitude."
-        : undefined;
-    return transactionDraftService.createFromVoiceTransactions({
-      userId,
-      spokenText: text,
-      fromParser: true,
-      warning,
-      transactions: [
-        {
-          type: parsed.type,
-          description: parsed.description,
-          category_hint: parsed.category_hint,
-          date: parsed.date,
-          confidence: parsed.confidence,
-          amount: parsed.amount,
-          items: [
-            {
-              description: parsed.description,
-              amount: parsed.amount,
-              quantity: 1,
-              unit_amount: parsed.amount,
-              type: parsed.type,
-            },
-          ],
-        },
-      ],
-    });
-  }
 
   try {
     const analysis = await aiService.analyzeVoiceText(text);

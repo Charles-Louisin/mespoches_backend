@@ -223,14 +223,19 @@ export class AIService {
             type: i.type === 'income' || i.type === 'expense' ? i.type : type,
           }))
         : []
+      const hasIncome = typedItems.some((i) => i.type === 'income')
+      const hasExpense = typedItems.some((i) => i.type === 'expense')
+      if (hasIncome && hasExpense) {
+        pushTx({ ...raw, type: 'expense', items: typedItems.filter((i) => i.type === 'expense') }, 'expense')
+        pushTx({ ...raw, type: 'income', items: typedItems.filter((i) => i.type === 'income') }, 'income')
+        return
+      }
       const amount =
         typedItems.length > 0
           ? typedItems.reduce((s, i) => s + i.amount, 0)
           : parseLooseAmount(raw.amount)
       if (!amount) return
-      const description = raw.description
-        ? String(raw.description).slice(0, 200)
-        : typedItems[0]?.description || 'Note vocale'
+      const description = this.voiceDescription(raw.description, typedItems)
       parsedTxs.push({
         type,
         description,
@@ -289,19 +294,38 @@ export class AIService {
     return { detected, confidence, transactions: detected ? grouped : [] }
   }
 
+  private voiceDescription(
+    raw: unknown,
+    items: Array<{ description: string }>
+  ): string {
+    const fromItems = [
+      ...new Set(
+        items
+          .map((i) => i.description.trim())
+          .filter((d) => d && !/^note vocale$/i.test(d) && !/^ligne\s/i.test(d))
+      ),
+    ]
+    if (fromItems.length) return fromItems.slice(0, 6).join(', ').slice(0, 200)
+    const rawText = raw ? String(raw).trim().slice(0, 200) : ''
+    if (rawText && !/^note vocale$/i.test(rawText)) return rawText
+    return items[0]?.description || 'Note vocale'
+  }
+
   private normalizeLineItems(raw: unknown): AiImageItem[] {
     if (!Array.isArray(raw)) return []
     const items: AiImageItem[] = []
     for (const row of raw) {
       const i = row as Record<string, unknown>
-      if (!i?.description) continue
       const lineAmount = parseLooseAmount(i.amount)
       if (!lineAmount) continue
       const quantity =
         typeof i.quantity === 'number' && i.quantity >= 1 ? Math.round(i.quantity) : 1
       const unitRaw = parseLooseAmount(i.unit_amount)
+      const description = i.description
+        ? String(i.description).trim().slice(0, 200)
+        : ''
       items.push({
-        description: String(i.description).slice(0, 200),
+        description: description || `Ligne ${Math.round(lineAmount)} F`,
         amount: lineAmount,
         quantity,
         unit_amount: unitRaw ?? (quantity > 1 ? lineAmount / quantity : lineAmount),
@@ -323,7 +347,10 @@ export class AIService {
       const amount = items.reduce((s, i) => s + i.amount, 0)
       merged.push({
         type,
-        description: list[0].description,
+        description: this.voiceDescription(
+          list[0].description,
+          items
+        ),
         category_hint: list.find((t) => t.category_hint)?.category_hint ?? null,
         date: list.find((t) => t.date)?.date ?? null,
         confidence: list.reduce((s, t) => s + t.confidence, 0) / list.length,
