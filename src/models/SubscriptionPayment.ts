@@ -1,4 +1,5 @@
 import mongoose, { Schema, Document, Model, Types } from 'mongoose';
+import type { PaidTier } from '../config/planLimits';
 
 export type BillingPeriod = 'monthly' | 'yearly';
 export type SubscriptionPaymentStatus = 'pending' | 'completed' | 'failed';
@@ -7,6 +8,7 @@ export interface ISubscriptionPayment extends Document {
   user_id: Types.ObjectId;
   transaction_id: string;
   period: BillingPeriod;
+  tier: PaidTier;
   amount: number;
   currency: string;
   status: SubscriptionPaymentStatus;
@@ -37,6 +39,11 @@ const subscriptionPaymentSchema = new Schema<ISubscriptionPayment>(
       type: String,
       enum: ['monthly', 'yearly'],
       required: true,
+    },
+    tier: {
+      type: String,
+      enum: ['pro', 'pro_plus', 'business'],
+      default: 'pro',
     },
     amount: { type: Number, required: true },
     currency: { type: String, default: 'XAF' },

@@ -151,11 +151,12 @@ export function premiumOnly(
 export function sendLimitError(
   res: Response,
   message: string,
-  opts?: { premium?: boolean }
+  opts?: { premium?: boolean; code?: string; data?: unknown }
 ): void {
   res.status(403).json({
     success: false,
-    code: opts?.premium ? PREMIUM_REQUIRED_CODE : 'LIMIT_REACHED',
+    code: opts?.code || (opts?.premium ? PREMIUM_REQUIRED_CODE : 'LIMIT_REACHED'),
     message,
+    ...(opts?.data !== undefined ? { data: opts.data } : {}),
   });
 }

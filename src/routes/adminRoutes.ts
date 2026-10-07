@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import User from '../models/User';
 import Wallet from '../models/Wallet';
 import Transaction from '../models/Transaction';
+import Category from '../models/Category';
 import PendingTransaction from '../models/PendingTransaction';
 import AnalyticsEvent from '../models/AnalyticsEvent';
 import { protect, adminOnly } from '../middleware/auth';
@@ -9,9 +10,13 @@ import { buildAdminInsights, buildTelemetryOverview } from '../services/adminIns
 import { listCohort } from '../services/adminCohorts';
 import {
   purgeUserAccount,
+  resumeUserBilling,
   revokeUserPremium,
+  setUserSubscription,
   setUserSuspended,
 } from '../services/adminUserActions';
+import { describePlan } from '../utils/subscription';
+import { isSubscriptionTier } from '../config/planLimits';
 import { parseListPage, listMeta } from '../utils/pagination';
 import { toPublicUser } from '../utils/userPayload';
 import type { IUser } from '../models/User';
@@ -58,15 +63,14 @@ router.get('/users', protect, adminOnly, async (req: Request, res: Response) => 
           $group: {
             _id: '$user_id',
             transactionsCount: { $sum: 1 },
-            totalIncome: {
-              $sum: {
-                $cond: [{ $eq: ['$type', 'income'] }, '$amount', 0],
-              },
+            incomeCount: {
+              $sum: { $cond: [{ $eq: ['$type', 'income'] }, 1, 0] },
             },
-            totalExpense: {
-              $sum: {
-                $cond: [{ $eq: ['$type', 'expense'] }, '$amount', 0],
-              },
+            expenseCount: {
+              $sum: { $cond: [{ $eq: ['$type', 'expense'] }, 1, 0] },
+            },
+            transferCount: {
+              $sum: { $cond: [{ $eq: ['$type', 'transfer'] }, 1, 0] },
             },
           },
         },
@@ -82,16 +86,18 @@ router.get('/users', protect, adminOnly, async (req: Request, res: Response) => 
       string,
       {
         transactionsCount: number;
-        totalIncome: number;
-        totalExpense: number;
+        incomeCount: number;
+        expenseCount: number;
+        transferCount: number;
       }
     >();
     transactionStats.forEach(
       (t: {
         _id: { toString(): string };
         transactionsCount: number;
-        totalIncome: number;
-        totalExpense: number;
+        incomeCount: number;
+        expenseCount: number;
+        transferCount: number;
       }) => {
         transactionMap.set(t._id.toString(), t);
       }
@@ -109,14 +115,18 @@ router.get('/users', protect, adminOnly, async (req: Request, res: Response) => 
         created_at: user.created_at,
         lastLoginAt: user.lastLoginAt,
         plan: user.plan,
+        planLabel: describePlan(user as unknown as IUser),
+        subscriptionTier: user.subscriptionTier || 'free',
+        lifetime: Boolean(user.lifetime),
         premiumSource: user.premiumSource,
         suspended: Boolean(user.suspendedAt),
         emailVerified: user.emailVerified,
         authProvider: user.authProvider,
         walletsCount: w?.walletsCount || 0,
         transactionsCount: t?.transactionsCount || 0,
-        totalIncome: t?.totalIncome || 0,
-        totalExpense: t?.totalExpense || 0,
+        incomeCount: t?.incomeCount || 0,
+        expenseCount: t?.expenseCount || 0,
+        transferCount: t?.transferCount || 0,
       };
     });
 
@@ -148,15 +158,17 @@ router.get('/users/:id', protect, adminOnly, async (req: Request, res: Response)
       });
     }
 
-    const [wallets, transactions, pending, events] = await Promise.all([
-      Wallet.find({ user_id: userId }).select('name currency current_balance is_deleted created_at').lean(),
+    const [walletsCount, categoriesCount, typeCounts, transactions, pending, events] = await Promise.all([
+      Wallet.countDocuments({ user_id: userId, is_deleted: { $ne: true } }),
+      Category.countDocuments({ user_id: userId }),
+      Transaction.aggregate([
+        { $match: { user_id: user._id } },
+        { $group: { _id: '$type', count: { $sum: 1 } } },
+      ]),
       Transaction.find({ user_id: userId })
-        .select('type amount description date wallet_id category_id')
-        .populate('wallet_id', 'name')
-        .populate('destination_wallet_id', 'name')
-        .populate('category_id', 'name')
+        .select('type date')
         .sort({ date: -1 })
-        .limit(100)
+        .limit(12)
         .lean(),
       PendingTransaction.aggregate([
         { $match: { user_id: user._id } },
@@ -168,12 +180,26 @@ router.get('/users/:id', protect, adminOnly, async (req: Request, res: Response)
     const pendingByStatus: Record<string, number> = {};
     for (const p of pending as { _id: string; count: number }[]) pendingByStatus[p._id] = p.count;
 
+    const transactionsByType: Record<string, number> = {};
+    for (const row of typeCounts as { _id: string; count: number }[]) {
+      transactionsByType[row._id] = row.count;
+    }
+
     return res.json({
       success: true,
       data: {
-        user,
-        wallets,
-        transactions,
+        user: {
+          ...user,
+          planLabel: describePlan(user as unknown as IUser),
+        },
+        walletsCount,
+        categoriesCount,
+        transactionsByType,
+        transactions: transactions.map((t) => ({
+          _id: t._id,
+          type: t.type,
+          date: t.date,
+        })),
         pendingByStatus,
         events: events.map((e) => ({
           name: e.name,
@@ -218,6 +244,52 @@ router.post('/users/:id/make-free', protect, adminOnly, async (req: Request, res
     return res.status(500).json({
       success: false,
       message: 'Impossible de passer ce compte en gratuit',
+    });
+  }
+});
+
+router.post('/users/:id/subscription', protect, adminOnly, async (req: Request, res: Response) => {
+  try {
+    const user = await User.findById(req.params.id);
+    const blocked = targetGuard(req.user as IUser, user);
+    if (blocked || !user) {
+      return res.status(blocked === 'Utilisateur introuvable' ? 404 : 400).json({
+        success: false,
+        message: blocked || 'Utilisateur introuvable',
+      });
+    }
+    const tier = req.body?.tier;
+    if (!isSubscriptionTier(tier)) {
+      return res.status(400).json({ success: false, message: 'Forfait invalide' });
+    }
+    await setUserSubscription(user, tier, Boolean(req.body?.lifetime) && tier !== 'free');
+    return res.json({ success: true, data: { user: toPublicUser(user), planLabel: describePlan(user) } });
+  } catch (error) {
+    console.error('Erreur admin subscription:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Impossible de modifier cet abonnement',
+    });
+  }
+});
+
+router.post('/users/:id/resume-billing', protect, adminOnly, async (req: Request, res: Response) => {
+  try {
+    const user = await User.findById(req.params.id);
+    const blocked = targetGuard(req.user as IUser, user);
+    if (blocked || !user) {
+      return res.status(blocked === 'Utilisateur introuvable' ? 404 : 400).json({
+        success: false,
+        message: blocked || 'Utilisateur introuvable',
+      });
+    }
+    await resumeUserBilling(user);
+    return res.json({ success: true, data: { user: toPublicUser(user), planLabel: describePlan(user) } });
+  } catch (error) {
+    console.error('Erreur admin resume billing:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Impossible de rétablir la facturation',
     });
   }
 });

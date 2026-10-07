@@ -6,6 +6,7 @@ import Transaction from '../models/Transaction';
 import PlannedExpense from '../models/PlannedExpense';
 import { protect, sendLimitError } from '../middleware/auth';
 import {
+  assertCapacity,
   isPremiumUser,
   getFreeHistoryStartDate,
   stripImageUrlIfFree,
@@ -233,6 +234,15 @@ router.post('/', protect, async (req: Request, res: Response) => {
         success: false,
         message: error.details[0].message,
       });
+    }
+
+    const walletCount = await Wallet.countDocuments({
+      user_id: req.user!._id,
+      is_deleted: { $ne: true },
+    });
+    const blocked = await assertCapacity(req.user!, 'wallets', walletCount);
+    if (blocked) {
+      return sendLimitError(res, blocked.message, { code: blocked.code, data: blocked.data });
     }
 
     const payload = stripImageUrlIfFree(req.user!, value);

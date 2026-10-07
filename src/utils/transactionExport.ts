@@ -12,6 +12,11 @@ export interface PopulatedTransactionLike {
   wallet_id?: { name?: string; currency?: string } | unknown;
   destination_wallet_id?: { name?: string } | unknown;
   category_id?: { name?: string } | null;
+  line_items?: Array<{
+    description?: string;
+    amount?: number;
+    quantity?: number;
+  }>;
 }
 
 function escapeCsv(value: string): string {
@@ -29,6 +34,19 @@ function walletName(w: PopulatedTransactionLike['wallet_id']): string {
 function categoryName(c: PopulatedTransactionLike['category_id']): string {
   if (c && typeof c === 'object' && 'name' in c) return String((c as { name: string }).name);
   return '';
+}
+
+function articlesLabel(t: PopulatedTransactionLike): string {
+  const items = t.line_items ?? [];
+  if (!items.length) return '';
+  return items
+    .map((item) => {
+      const name = (item.description || 'Article').trim();
+      const qty = item.quantity && item.quantity > 1 ? ` ×${item.quantity}` : '';
+      const amount = item.amount != null ? ` (${formatAmountWithSpaces(item.amount)})` : '';
+      return `${name}${qty}${amount}`;
+    })
+    .join(' ; ');
 }
 
 function typeLabel(type: string): string {
@@ -80,6 +98,7 @@ export function transactionToCsvRow(t: PopulatedTransactionLike): string {
     escapeCsv(dest),
     escapeCsv(categoryName(t.category_id)),
     escapeCsv(t.description || ''),
+    escapeCsv(articlesLabel(t)),
     cur,
     t.balance_before != null ? String(t.balance_before) : '',
     t.balance_after != null ? String(t.balance_after) : '',
@@ -87,7 +106,7 @@ export function transactionToCsvRow(t: PopulatedTransactionLike): string {
 }
 
 export const CSV_HEADER =
-  'Date,Type,Montant,Poche,Destination,Catégorie,Description,Devise,Solde avant,Solde après';
+  'Date,Type,Montant,Poche,Destination,Catégorie,Description,Articles,Devise,Solde avant,Solde après';
 
 export function buildTransactionsCsv(transactions: PopulatedTransactionLike[]): string {
   const rows = transactions.map(transactionToCsvRow);
@@ -115,6 +134,7 @@ function transactionToExcelRow(t: PopulatedTransactionLike): Record<string, stri
     Destination: dest,
     Catégorie: categoryName(t.category_id),
     Description: t.description || '',
+    Articles: articlesLabel(t),
     Devise: cur,
     'Solde avant': excelAmountValue(t.balance_before),
     'Solde après': excelAmountValue(t.balance_after),
@@ -167,6 +187,8 @@ export function buildTransactionPdf(
     } else {
       if (categoryName(t.category_id)) lines.push(['Catégorie', categoryName(t.category_id)]);
       if (t.description) lines.push(['Description', t.description]);
+      const articles = articlesLabel(t);
+      if (articles) lines.push(['Articles', articles]);
       if (t.balance_before != null)
         lines.push(['Solde avant', formatMoney(t.balance_before, currency)]);
       if (t.balance_after != null)
@@ -214,6 +236,7 @@ export function buildTransactionsPdf(transactions: PopulatedTransactionLike[]): 
         walletName(t.wallet_id),
         categoryName(t.category_id),
         t.description,
+        articlesLabel(t),
       ].filter(Boolean);
       if (parts.length) doc.text(parts.join(' · '));
     });

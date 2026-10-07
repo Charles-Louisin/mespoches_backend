@@ -3,8 +3,7 @@ import Joi from 'joi';
 import { FilterQuery } from 'mongoose';
 import Category, { ICategory } from '../models/Category';
 import { protect, sendLimitError } from '../middleware/auth';
-import { PLAN_LIMITS } from '../config/planLimits';
-import { isPremiumUser } from '../utils/subscription';
+import { assertCapacity, isPremiumUser } from '../utils/subscription';
 
 const router = Router();
 
@@ -81,17 +80,10 @@ router.post('/', protect, async (req: Request, res: Response) => {
 
     const count = await Category.countDocuments({
       user_id: req.user!._id,
-      type: value.type,
     });
-    if (
-      !isPremiumUser(req.user!) &&
-      count >= PLAN_LIMITS.FREE_MAX_CATEGORIES_PER_TYPE
-    ) {
-      return sendLimitError(
-        res,
-        `Limite atteinte : ${PLAN_LIMITS.FREE_MAX_CATEGORIES_PER_TYPE} catégories ${value.type === 'income' ? 'de revenus' : 'de dépenses'} maximum en version gratuite.`,
-        { premium: true }
-      );
+    const blocked = await assertCapacity(req.user!, 'categories', count);
+    if (blocked) {
+      return sendLimitError(res, blocked.message, { code: blocked.code, data: blocked.data });
     }
 
     if (value.image_url && !isPremiumUser(req.user!)) {

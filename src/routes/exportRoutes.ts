@@ -1,6 +1,8 @@
 import { Router, Request, Response } from 'express';
+import type { IUser } from '../models/User';
 import Transaction from '../models/Transaction';
-import { protect, premiumOnly } from '../middleware/auth';
+import { protect, premiumOnly, sendLimitError } from '../middleware/auth';
+import { canExportRange, exportFormatDenied } from '../utils/subscription';
 import { exportLimiter } from '../utils/security';
 import {
   buildSingleTransactionCsv,
@@ -46,13 +48,29 @@ async function getUserTransaction(
     .populate('category_id', 'name');
 }
 
+function exportSince(user: IUser, raw: unknown): Date | null {
+  if (!user || !canExportRange(user)) return null;
+  const days = Math.min(3660, Math.max(0, parseInt(String(raw || ''), 10) || 0));
+  if (!days) return null;
+  const since = new Date();
+  since.setHours(0, 0, 0, 0);
+  since.setDate(since.getDate() - (days - 1));
+  return since;
+}
+
 router.get('/transactions', protect, premiumOnly, exportLimiter, async (req: Request, res: Response) => {
   try {
     const format = (req.query.format as string) || 'csv';
+    const denied = exportFormatDenied(req.user!, format);
+    if (denied) {
+      return sendLimitError(res, denied.message, { code: denied.code, data: denied.data });
+    }
+    const since = exportSince(req.user!, req.query.days);
 
     const transactions = await Transaction.find({
       user_id: req.user!._id,
       ...listQuery,
+      ...(since ? { date: { $gte: since } } : {}),
     })
       .populate('wallet_id', 'name')
       .populate('destination_wallet_id', 'name')
@@ -97,6 +115,10 @@ router.get('/transactions', protect, premiumOnly, exportLimiter, async (req: Req
 router.get('/transactions/:id', protect, premiumOnly, exportLimiter, async (req: Request, res: Response) => {
   try {
     const format = (req.query.format as string) || 'csv';
+    const denied = exportFormatDenied(req.user!, format);
+    if (denied) {
+      return sendLimitError(res, denied.message, { code: denied.code, data: denied.data });
+    }
     const transaction = await getUserTransaction(req.user!._id, req.params.id);
 
     if (!transaction) {

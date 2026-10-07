@@ -1,7 +1,8 @@
 import { Router, Request, Response } from 'express';
 import Joi from 'joi';
 import PendingTransaction from '../models/PendingTransaction';
-import { protect, premiumOnly } from '../middleware/auth';
+import { protect, sendLimitError } from '../middleware/auth';
+import { assertAiQuota, recordAiUsage } from '../utils/subscription';
 import {
   createFromSms,
   createFromNotification,
@@ -352,8 +353,12 @@ router.post('/parse-notification', parseIngestLimiter, async (req: Request, res:
   }
 });
 
-router.post('/voice-note', premiumOnly, aiScanLimiter, async (req: Request, res: Response) => {
+router.post('/voice-note', aiScanLimiter, async (req: Request, res: Response) => {
   try {
+    const blocked = await assertAiQuota(req.user!, 'voice');
+    if (blocked) {
+      return sendLimitError(res, blocked.message, { code: blocked.code, data: blocked.data });
+    }
     const audio = String(req.body.audio || '').trim();
     const mimeType = String(req.body.mimeType || 'audio/mp4');
     let text = String(req.body.text || '').trim().slice(0, MAX_PARSE_TEXT_CHARS);
@@ -365,6 +370,7 @@ router.post('/voice-note', premiumOnly, aiScanLimiter, async (req: Request, res:
       return;
     }
     const items = await createFromVoiceNote(req.user!._id, text);
+    await recordAiUsage(req.user!, 'voice');
     res.status(201).json({
       success: true,
       data: items,
@@ -381,8 +387,12 @@ router.post('/voice-note', premiumOnly, aiScanLimiter, async (req: Request, res:
   }
 });
 
-router.post('/ai-scan', premiumOnly, aiScanLimiter, async (req: Request, res: Response) => {
+router.post('/ai-scan', aiScanLimiter, async (req: Request, res: Response) => {
   try {
+    const blocked = await assertAiQuota(req.user!, 'scans');
+    if (blocked) {
+      return sendLimitError(res, blocked.message, { code: blocked.code, data: blocked.data });
+    }
     const image = String(req.body.image || '');
     const mimeType = String(req.body.mimeType || 'image/jpeg');
     if (!image) {
@@ -391,6 +401,7 @@ router.post('/ai-scan', premiumOnly, aiScanLimiter, async (req: Request, res: Re
     }
 
     const result = await createFromAiScan(req.user!._id, image, mimeType);
+    await recordAiUsage(req.user!, 'scans');
     res.status(201).json({
       success: true,
       data: result.items,

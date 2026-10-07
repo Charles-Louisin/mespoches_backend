@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { protect } from '../middleware/auth';
-import { SUBSCRIPTION_PLANS } from '../config/planLimits';
+import { SUBSCRIPTION_PLANS, TIER_DEFS, isPaidTier, priceFor, type PaidTier } from '../config/planLimits';
 import type { BillingPeriod } from '../models/SubscriptionPayment';
 import SubscriptionPayment from '../models/SubscriptionPayment';
 import User from '../models/User';
@@ -92,7 +92,9 @@ router.post('/checkout', protect, async (req: Request, res: Response) => {
     const paymentMethod =
       PAYMENT_METHODS[methodKey] ?? PAYMENT_METHODS.all;
 
-    const plan = SUBSCRIPTION_PLANS[period];
+    const requested = req.body?.tier;
+    const tier: PaidTier = isPaidTier(requested) ? requested : 'pro';
+    const amount = priceFor(tier, period);
     const user = req.user!;
     const merchantTransactionId = generateMerchantTransactionId();
     const frontendUrl = getFrontendUrl();
@@ -110,15 +112,16 @@ router.post('/checkout', protect, async (req: Request, res: Response) => {
       user_id: user._id,
       transaction_id: merchantTransactionId,
       period,
-      amount: plan.priceXaf,
+      tier,
+      amount,
       currency: 'XAF',
       status: 'pending',
     });
 
     const init = await initCinetPayPayment({
       merchantTransactionId,
-      amount: plan.priceXaf,
-      description: `MES POCHES Premium — ${plan.label}`,
+      amount,
+      description: `MES POCHES ${TIER_DEFS[tier].label} — ${SUBSCRIPTION_PLANS[period].label}`,
       notifyUrl: `${apiUrl}/api/webhooks/cinetpay`,
       successUrl,
       failedUrl,

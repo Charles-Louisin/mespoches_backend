@@ -19,7 +19,7 @@ import FeedbackMessage from '../models/FeedbackMessage';
 import { invalidateUserCache, protect } from '../middleware/auth';
 import { sendExistingAccountEmail } from '../utils/email';
 import { toPublicUser } from '../utils/userPayload';
-import { getNewUserTrialFields, syncExpiredPremium } from '../utils/subscription';
+import { buildUsage, getNewUserTrialFields, syncExpiredPremium } from '../utils/subscription';
 import {
   setVerificationCode,
   setPasswordResetCode,
@@ -618,7 +618,7 @@ router.get('/me', protect, async (req: Request, res: Response) => {
     const user = req.user!;
     return res.json({
       success: true,
-      data: toPublicUser(user),
+      data: { ...toPublicUser(user), ...(await buildUsage(user)) },
     });
   } catch (error) {
     console.error('Erreur auth me:', error);

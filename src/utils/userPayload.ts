@@ -1,5 +1,5 @@
 import { IUser } from '../models/User';
-import { isOnTrial, isPremiumUser } from './subscription';
+import { accessTier, isOnTrial, isPremiumUser, storedTier } from './subscription';
 
 export function toPublicUser(user: IUser) {
   const premium = isPremiumUser(user);
@@ -10,6 +10,9 @@ export function toPublicUser(user: IUser) {
     name: user.name,
     role: user.role,
     plan: user.plan,
+    subscriptionTier: storedTier(user),
+    accessTier: accessTier(user),
+    lifetime: Boolean(user.lifetime),
     premiumUntil: user.premiumUntil,
     premiumSource: user.premiumSource ?? null,
     isPremium: premium,

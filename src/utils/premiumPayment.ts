@@ -46,8 +46,11 @@ export async function fulfillSubscriptionPayment(
 
   const premiumUntil = computePremiumUntil(user.premiumUntil, payment.period);
 
+  const tier = payment.tier === 'pro_plus' || payment.tier === 'business' ? payment.tier : 'pro';
   await User.findByIdAndUpdate(user._id, {
     plan: 'premium',
+    subscriptionTier: tier,
+    lifetime: false,
     premiumUntil,
     premiumSource: 'paid',
   });

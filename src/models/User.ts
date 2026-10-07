@@ -8,7 +8,8 @@ export interface ILoginHistoryEntry {
 }
 
 export type UserPlan = 'free' | 'premium';
-export type PremiumSource = 'trial' | 'paid';
+export type PremiumSource = 'trial' | 'paid' | 'lifetime';
+export type SubscriptionTier = 'free' | 'pro' | 'pro_plus' | 'business';
 export type AuthProvider = 'email' | 'google' | 'both';
 
 export interface IUser extends Document {
@@ -23,9 +24,17 @@ export interface IUser extends Document {
   verificationAttempts?: number;
   role: 'user' | 'admin';
   plan: UserPlan;
+  /** Forfait commercial. L'accès réel dépend aussi de premiumUntil et de lifetime. */
+  subscriptionTier: SubscriptionTier;
+  /** Forfait offert sans échéance : le palier reste, le paiement n'est plus exigé. */
+  lifetime: boolean;
   premiumUntil: Date | null;
-  /** Origine du Premium actif : essai gratuit ou abonnement payé. */
+  /** Origine du Premium actif : essai gratuit, abonnement payé ou forfait à vie. */
   premiumSource: PremiumSource | null;
+  /** Mois civil des compteurs IA, format YYYY-MM. */
+  usagePeriod: string | null;
+  aiScansUsed: number;
+  voiceNotesUsed: number;
   name?: string;
   currency: string;
   hidePlannedExpensesHelp: boolean;
@@ -104,14 +113,37 @@ const userSchema = new Schema<IUser>(
       enum: ['free', 'premium'],
       default: 'free',
     },
+    subscriptionTier: {
+      type: String,
+      enum: ['free', 'pro', 'pro_plus', 'business'],
+      default: 'free',
+    },
+    lifetime: {
+      type: Boolean,
+      default: false,
+    },
     premiumUntil: {
       type: Date,
       default: null,
     },
     premiumSource: {
       type: String,
-      enum: ['trial', 'paid'],
+      enum: ['trial', 'paid', 'lifetime'],
       default: null,
+    },
+    usagePeriod: {
+      type: String,
+      default: null,
+    },
+    aiScansUsed: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    voiceNotesUsed: {
+      type: Number,
+      default: 0,
+      min: 0,
     },
     name: {
       type: String,

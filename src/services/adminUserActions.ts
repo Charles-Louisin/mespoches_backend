@@ -10,11 +10,14 @@ import SavingsGoal from '../models/SavingsGoal';
 import SmsHabit from '../models/SmsHabit';
 import SubscriptionPayment from '../models/SubscriptionPayment';
 import Transaction from '../models/Transaction';
-import User, { IUser } from '../models/User';
+import User, { IUser, SubscriptionTier } from '../models/User';
+import { isSubscriptionTier } from '../config/planLimits';
 import Wallet from '../models/Wallet';
 
 export async function revokeUserPremium(user: IUser): Promise<IUser> {
   user.plan = 'free';
+  user.subscriptionTier = 'free';
+  user.lifetime = false;
   user.premiumUntil = null;
   user.premiumSource = null;
   user.tokenVersion = (user.tokenVersion ?? 0) + 1;
@@ -23,6 +26,42 @@ export async function revokeUserPremium(user: IUser): Promise<IUser> {
     { user_id: user._id, status: 'pending' },
     { $set: { status: 'failed', cinetpay_status: 'admin_revoked' } }
   );
+  invalidateUserCache(user._id.toString());
+  return user;
+}
+
+export async function setUserSubscription(
+  user: IUser,
+  tier: SubscriptionTier,
+  lifetime: boolean
+): Promise<IUser> {
+  if (!isSubscriptionTier(tier) || tier === 'free') {
+    return revokeUserPremium(user);
+  }
+  user.subscriptionTier = tier;
+  user.plan = 'premium';
+  user.lifetime = lifetime;
+  if (lifetime) {
+    user.premiumUntil = null;
+    user.premiumSource = 'lifetime';
+  } else {
+    const until = new Date();
+    until.setMonth(until.getMonth() + 1);
+    user.premiumUntil = until;
+    user.premiumSource = 'paid';
+  }
+  await user.save();
+  invalidateUserCache(user._id.toString());
+  return user;
+}
+
+/** Retire le forfait à vie : le palier est mémorisé, l'accès s'arrête jusqu'au prochain paiement. */
+export async function resumeUserBilling(user: IUser): Promise<IUser> {
+  user.lifetime = false;
+  user.plan = 'free';
+  user.premiumUntil = null;
+  if (user.premiumSource === 'lifetime') user.premiumSource = null;
+  await user.save();
   invalidateUserCache(user._id.toString());
   return user;
 }

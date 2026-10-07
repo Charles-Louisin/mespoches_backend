@@ -3,11 +3,35 @@ import { escapeHtml, generateSecureOtp } from './security';
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-/** Domaine d'envoi vérifié sur Resend (gmail.com ne peut pas servir d'expéditeur). */
-const FROM_EMAIL =
-  process.env.RESEND_FROM_EMAIL || 'MES POCHES <onboarding@resend.dev>';
+const SITE_URL = (process.env.APP_URL || 'https://www.mespoches.store').replace(/\/$/, '');
+const CONTACT_EMAIL = 'contact@mespoches.store';
 
-const REPLY_TO = process.env.RESEND_REPLY_TO || undefined;
+/** Expéditeur vérifié sur Resend. Jamais une adresse personnelle. */
+const FROM_EMAIL =
+  process.env.RESEND_FROM_EMAIL || `MES POCHES <noreply@mespoches.store>`;
+
+const REPLY_TO = process.env.RESEND_REPLY_TO || CONTACT_EMAIL;
+
+function logoUrl(): string {
+  return `${SITE_URL}/logo.png`;
+}
+
+function emailLayout(body: string): string {
+  return `<!DOCTYPE html>
+<html lang="fr">
+<body style="margin:0;padding:0;background:#f4f7fb;">
+  <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:520px;margin:0 auto;padding:28px 20px;color:#1b1630;">
+    <img src="${logoUrl()}" width="56" height="56" alt="MES POCHES" style="display:block;width:56px;height:56px;border-radius:14px;border:0;" />
+    <p style="margin:14px 0 0;font-size:13px;letter-spacing:0.18em;font-weight:700;color:#2563EB;">MES POCHES</p>
+    ${body}
+    <p style="margin-top:28px;color:#6b7280;font-size:13px;line-height:1.5;">
+      Une question ? Écrivez à
+      <a href="mailto:${CONTACT_EMAIL}" style="color:#2563EB;text-decoration:none;">${CONTACT_EMAIL}</a>
+    </p>
+  </div>
+</body>
+</html>`;
+}
 
 export function generateVerificationCode(): string {
   return generateSecureOtp();
@@ -26,16 +50,13 @@ export async function sendVerificationEmail(
     to,
     ...(REPLY_TO ? { replyTo: REPLY_TO } : {}),
     subject: 'Votre code de vérification — MES POCHES',
-    html: `
-      <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
-        <h1 style="color: #0ea5e9; font-size: 24px;">MES POCHES</h1>
-        <p>Bienvenue ! Utilisez le code ci-dessous pour vérifier votre adresse email :</p>
-        <div style="background: #f0f9ff; border-radius: 12px; padding: 24px; text-align: center; margin: 24px 0;">
-          <span style="font-size: 36px; font-weight: bold; letter-spacing: 8px; color: #0369a1;">${escapeHtml(code)}</span>
+    html: emailLayout(`
+        <p style="font-size:16px;line-height:1.6;">Bienvenue. Utilisez ce code pour vérifier votre adresse e-mail :</p>
+        <div style="background:#EEF4FF;border-radius:14px;padding:24px;text-align:center;margin:24px 0;">
+          <span style="font-size:36px;font-weight:bold;letter-spacing:8px;color:#1d4ed8;">${escapeHtml(code)}</span>
         </div>
-        <p style="color: #6b7280; font-size: 14px;">Ce code expire dans 15 minutes. Si vous n'avez pas demandé ce code, ignorez cet email.</p>
-      </div>
-    `,
+        <p style="color:#6b7280;font-size:14px;line-height:1.5;">Ce code expire dans 15 minutes. Si vous n'avez pas demandé ce code, ignorez cet e-mail.</p>
+    `),
   });
 
   if (error) {
@@ -57,16 +78,13 @@ export async function sendPasswordResetEmail(
     to,
     ...(REPLY_TO ? { replyTo: REPLY_TO } : {}),
     subject: 'Réinitialisation du mot de passe — MES POCHES',
-    html: `
-      <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
-        <h1 style="color: #0ea5e9; font-size: 24px;">MES POCHES</h1>
-        <p>Vous avez demandé à définir ou réinitialiser votre mot de passe. Utilisez ce code :</p>
-        <div style="background: #f0f9ff; border-radius: 12px; padding: 24px; text-align: center; margin: 24px 0;">
-          <span style="font-size: 36px; font-weight: bold; letter-spacing: 8px; color: #0369a1;">${escapeHtml(code)}</span>
+    html: emailLayout(`
+        <p style="font-size:16px;line-height:1.6;">Vous avez demandé à définir ou réinitialiser votre mot de passe. Utilisez ce code :</p>
+        <div style="background:#EEF4FF;border-radius:14px;padding:24px;text-align:center;margin:24px 0;">
+          <span style="font-size:36px;font-weight:bold;letter-spacing:8px;color:#1d4ed8;">${escapeHtml(code)}</span>
         </div>
-        <p style="color: #6b7280; font-size: 14px;">Ce code expire dans 15 minutes. Si vous n'avez pas fait cette demande, ignorez cet email.</p>
-      </div>
-    `,
+        <p style="color:#6b7280;font-size:14px;line-height:1.5;">Ce code expire dans 15 minutes. Si vous n'avez pas fait cette demande, ignorez cet e-mail.</p>
+    `),
   });
 
   if (error) {
@@ -90,14 +108,11 @@ export async function sendExistingAccountEmail(to: string): Promise<void> {
     to,
     ...(REPLY_TO ? { replyTo: REPLY_TO } : {}),
     subject: 'Tentative d’inscription — MES POCHES',
-    html: `
-      <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
-        <h1 style="color: #0ea5e9; font-size: 24px;">MES POCHES</h1>
-        <p>Quelqu'un vient d'essayer de créer un compte avec cette adresse email, mais un compte existe déjà.</p>
-        <p>Si c'était vous, connectez-vous normalement. Mot de passe oublié ? Utilisez « Mot de passe oublié » sur la page de connexion.</p>
-        <p style="color: #6b7280; font-size: 14px;">Si ce n'était pas vous, aucune action n'est nécessaire : votre compte n'a pas été modifié.</p>
-      </div>
-    `,
+    html: emailLayout(`
+        <p style="font-size:16px;line-height:1.6;">Quelqu'un vient d'essayer de créer un compte avec cette adresse e-mail, mais un compte existe déjà.</p>
+        <p style="font-size:16px;line-height:1.6;">Si c'était vous, connectez-vous. Mot de passe oublié ? Utilisez « Mot de passe oublié » sur la page de connexion.</p>
+        <p style="color:#6b7280;font-size:14px;line-height:1.5;">Si ce n'était pas vous, aucune action n'est nécessaire : votre compte n'a pas été modifié.</p>
+    `),
   });
 
   if (error) {
@@ -154,15 +169,12 @@ export async function sendPlannedExpensesReminderEmail(
     to,
     ...(REPLY_TO ? { replyTo: REPLY_TO } : {}),
     subject: `Rappel : vos dépenses prévues pour ${tomorrowLabel} — MES POCHES`,
-    html: `
-      <div style="font-family: sans-serif; max-width: 520px; margin: 0 auto; padding: 24px;">
-        <h1 style="color: #0ea5e9; font-size: 22px;">MES POCHES</h1>
-        <p>Bonjour ${escapeHtml(userName)},</p>
-        <p>Demain (<strong>${escapeHtml(tomorrowLabel)}</strong>, UTC), les dépenses suivantes seront débitées automatiquement si votre solde le permet :</p>
-        <ul style="padding-left: 20px;">${rows}</ul>
-        <p style="color: #6b7280; font-size: 14px;">Si le solde est insuffisant le jour J, la dépense sera annulée automatiquement. Vous pouvez encore annuler une dépense prévue depuis l'app tant que le jour J n'est pas arrivé.</p>
-      </div>
-    `,
+    html: emailLayout(`
+        <p style="font-size:16px;line-height:1.6;">Bonjour ${escapeHtml(userName)},</p>
+        <p style="font-size:16px;line-height:1.6;">Demain (<strong>${escapeHtml(tomorrowLabel)}</strong>), les dépenses suivantes seront débitées automatiquement si votre solde le permet :</p>
+        <ul style="padding-left:20px;">${rows}</ul>
+        <p style="color:#6b7280;font-size:14px;line-height:1.5;">Si le solde est insuffisant le jour J, la dépense sera annulée. Vous pouvez encore l'annuler depuis l'app avant cette date.</p>
+    `),
   });
 
   if (error) {
