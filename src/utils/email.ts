@@ -182,3 +182,45 @@ export async function sendPlannedExpensesReminderEmail(
     throw new Error("Impossible d'envoyer le rappel");
   }
 }
+
+export type TwoFactorPurpose = 'login' | 'enable' | 'disable';
+
+const TWO_FACTOR_COPY: Record<TwoFactorPurpose, { subject: string; intro: string }> = {
+  login: {
+    subject: 'Code de connexion — MES POCHES',
+    intro: 'Une connexion à votre compte est en cours. Saisissez ce code dans l’application :',
+  },
+  enable: {
+    subject: 'Activer la double authentification — MES POCHES',
+    intro: 'Pour activer la double authentification, saisissez ce code dans l’application :',
+  },
+  disable: {
+    subject: 'Désactiver la double authentification — MES POCHES',
+    intro: 'Pour désactiver la double authentification, saisissez ce code dans l’application :',
+  },
+};
+
+/** Code de double authentification (connexion, activation ou désactivation). */
+export async function sendTwoFactorEmail(to: string, code: string, purpose: TwoFactorPurpose): Promise<void> {
+  if (!process.env.RESEND_API_KEY) {
+    throw new Error('RESEND_API_KEY manquant');
+  }
+  const copy = TWO_FACTOR_COPY[purpose];
+  const { error } = await resend.emails.send({
+    from: FROM_EMAIL,
+    to,
+    ...(REPLY_TO ? { replyTo: REPLY_TO } : {}),
+    subject: copy.subject,
+    html: emailLayout(`
+        <p style="font-size:16px;line-height:1.6;">${escapeHtml(copy.intro)}</p>
+        <div style="background:#EEF4FF;border-radius:14px;padding:24px;text-align:center;margin:24px 0;">
+          <span style="font-size:36px;font-weight:bold;letter-spacing:8px;color:#1d4ed8;">${escapeHtml(code)}</span>
+        </div>
+        <p style="color:#6b7280;font-size:14px;line-height:1.5;">Ce code expire dans 10 minutes. Si ce n’est pas vous, ne communiquez ce code à personne et changez votre mot de passe.</p>
+    `),
+  });
+  if (error) {
+    console.error('Erreur Resend 2FA:', error);
+    throw new Error("Impossible d'envoyer le code de connexion");
+  }
+}

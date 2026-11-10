@@ -24,14 +24,14 @@ const router = Router();
 const walletSchema = Joi.object({
   name: Joi.string().required(),
   currency: Joi.string().default('XAF'),
-  image_url: Joi.string().uri().allow(null, '').optional(),
+  image_url: Joi.string().uri({ scheme: ['https'] }).max(2048).allow(null, '').optional(),
   initial_balance: Joi.number().min(0).max(1_000_000_000).optional(),
 });
 
 const walletUpdateSchema = Joi.object({
   name: Joi.string().optional(),
   currency: Joi.string().optional(),
-  image_url: Joi.string().uri().allow(null, '').optional(),
+  image_url: Joi.string().uri({ scheme: ['https'] }).max(2048).allow(null, '').optional(),
 });
 
 router.get('/', protect, async (req: Request, res: Response) => {

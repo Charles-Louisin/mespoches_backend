@@ -23,5 +23,7 @@ export function toPublicUser(user: IUser) {
     created_at: user.created_at,
     lastLoginAt: user.lastLoginAt || null,
     suspended: Boolean(user.suspendedAt),
+    twoFactorEnabled: Boolean(user.twoFactorEnabled),
+    authProvider: user.authProvider,
   };
 }

@@ -19,6 +19,8 @@ export type AiImageItem = {
   date?: string | null
   currency?: string
   confidence?: number
+  /** Nom de catégorie du compte proposé par l'IA (même type que la ligne), ou null. */
+  category?: string | null
 }
 
 /** Réponse JSON image — format canonique MES POCHES. */

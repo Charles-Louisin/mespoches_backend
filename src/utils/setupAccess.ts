@@ -2,13 +2,13 @@ import crypto from 'crypto';
 import { Request, Response } from 'express';
 
 /**
- * Protège les endpoints d'info ops (IP CinetPay, checklist).
- * En production : exige CINETPAY_SETUP_SECRET via le header X-Setup-Secret.
+ * Protège les endpoints d'info ops (IP sortante SasPay, métriques).
+ * En production : exige OPS_SETUP_SECRET via le header X-Setup-Secret.
  * En développement : ouvert si le secret n'est pas défini.
  */
 export function assertSetupAccess(req: Request, res: Response): boolean {
   const secret = (
-    process.env.CINETPAY_SETUP_SECRET ||
+    process.env.OPS_SETUP_SECRET ||
     process.env.ADMIN_SETUP_SECRET ||
     ''
   ).trim();

@@ -21,15 +21,13 @@ import pendingTransactionRoutes from './routes/pendingTransactionRoutes';
 import uploadRoutes from './routes/uploadRoutes';
 import telemetryRoutes from './routes/telemetryRoutes';
 import feedbackRoutes from './routes/feedbackRoutes';
+import appVersionRoutes from './routes/appVersionRoutes';
+import adminReleaseRoutes from './routes/adminReleaseRoutes';
 import { startPlannedExpenseScheduler } from './jobs/plannedExpenseScheduler';
-import {
-  getCinetPayEnvironment,
-  getCinetPaySetupPayload,
-  isCinetPayConfigured,
-} from './utils/cinetpay';
 import { assertSetupAccess } from './utils/setupAccess';
 import { sanitizeMongoKeys } from './middleware/sanitize';
 import { apiLimiter } from './utils/security';
+import { detectServerPublicIp, isSasPayConfigured, isSasPayLive } from './utils/saspay';
 import { connectMongo as openMongoPool, mongoPoolStats } from './db';
 import { metricsSnapshot, requestMetrics, requestTimeout } from './middleware/requestMetrics';
 
@@ -42,6 +40,11 @@ const MONGODB_URI = process.env.MONGODB_URI;
 
 if (!MONGODB_URI) {
   console.error("❌ MONGODB_URI manquant dans les variables d'environnement");
+  process.exit(1);
+}
+
+if ((process.env.NODE_ENV || "development") === "production" && (process.env.JWT_SECRET || "").trim().length < 32) {
+  console.error("❌ JWT_SECRET trop court en production (32 caractères minimum)");
   process.exit(1);
 }
 
@@ -124,7 +127,14 @@ app.use(
 app.use(requestTimeout);
 app.use(requestMetrics);
 
-const jsonSmall = express.json({ limit: '256kb' });
+// Corps brut conservé pour les webhooks signés (HMAC calculé sur les octets reçus, jamais re-sérialisés).
+const jsonSmall = express.json({
+  limit: '256kb',
+  verify: (req, _res, buf) => {
+    const url = ((req as express.Request).originalUrl || req.url || '').split('?')[0];
+    if (url.includes('/webhooks/')) (req as express.Request & { rawBody?: Buffer }).rawBody = Buffer.from(buf);
+  },
+});
 const jsonLarge = express.json({ limit: '8mb' });
 app.use((req, res, next) => {
   const ct = String(req.headers['content-type'] || '');
@@ -161,28 +171,29 @@ app.get('/api/health', async (req, res) => {
     payload.env = NODE_ENV;
   }
 
-  // Détails CinetPay uniquement avec secret ops
-  if (req.query.cinetpay === '1' || req.query.cinetpay === 'true') {
-    if (!assertSetupAccess(req, res)) return;
-    payload.cinetpayEnv = getCinetPayEnvironment();
-    payload.cinetpayConfigured = isCinetPayConfigured();
-    payload.cinetpay = await getCinetPaySetupPayload();
-  }
-
   res.json({ ...payload, process: { rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024) } });
 });
 
-/** Métriques process + temps par route — protégé (même secret que CinetPay setup). */
+/** Métriques process + temps par route — protégé (secret ops OPS_SETUP_SECRET). */
 app.get('/api/metrics', (req, res) => {
   if (!assertSetupAccess(req, res)) return;
   res.json({ success: true, data: { ...metricsSnapshot(), mongo: mongoPoolStats() } });
 });
 
-/** Alias racine — IP à whitelister (sandbox ou prod) — protégé */
-app.get('/api/cinetpay-setup', async (req, res) => {
+/** IP sortante à whitelister chez SasPay — protégé (secret ops OPS_SETUP_SECRET) */
+app.get('/api/saspay-setup', async (req, res) => {
   if (!assertSetupAccess(req, res)) return;
-  const data = await getCinetPaySetupPayload();
-  res.json({ success: true, data });
+  const ip = await detectServerPublicIp();
+  res.json({
+    success: true,
+    data: {
+      ...ip,
+      whitelist: 'app.saspay.me → Développeur → IP Whitelist',
+      saspayConfigured: isSasPayConfigured(),
+      saspayMode: isSasPayConfigured() ? (isSasPayLive() ? 'live' : 'test') : null,
+      webhookSecretConfigured: Boolean(process.env.SASPAY_WEBHOOK_SECRET?.trim()),
+    },
+  });
 });
 
 app.use('/api/auth', authRoutes);
@@ -197,11 +208,15 @@ app.use('/api/recurring', recurringRoutes);
 app.use('/api/export', exportRoutes);
 app.use('/api/subscription', subscriptionRoutes);
 app.use('/api/webhooks', webhookRoutes);
+// Alias sans /api : URL configurée dans le tableau de bord SasPay (…/webhooks/saspay)
+app.use('/webhooks', webhookRoutes);
 app.use('/api/planned-expenses', plannedExpenseRoutes);
 app.use('/api/pending-transactions', pendingTransactionRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/telemetry', telemetryRoutes);
 app.use('/api/feedback', feedbackRoutes);
+app.use('/api/app', appVersionRoutes);
+app.use('/api/admin/app-release', adminReleaseRoutes);
 
 app.use(
   (
@@ -243,22 +258,11 @@ function logStartupBanner(mongoOk: boolean): void {
   console.log(
     `  UploadThing   : ${uploadOk ? '✅ configuré' : '⚠️  UPLOADTHING_TOKEN manquant'}`
   );
-  const cinetpayOk = Boolean(
-    (process.env.CINETPAY_ACCOUNT_KEY || process.env.CINETPAY_API_KEY)?.trim() &&
-      (process.env.CINETPAY_ACCOUNT_PASSWORD || process.env.CINETPAY_API_PASSWORD)?.trim()
-  );
-  const cinetpayEnv =
-    process.env.CINETPAY_ENV?.trim().toLowerCase() ||
-    (isProduction ? 'production (auto)' : 'sandbox (auto)');
   console.log(
-    `  CinetPay      : ${cinetpayOk ? `✅ configuré (${cinetpayEnv})` : '⚠️  non configuré'}`
+    `  SasPay        : ${isSasPayConfigured() ? `✅ configuré (${isSasPayLive() ? 'live' : 'test'})` : '⚠️  SASPAY_SECRET_KEY manquant'}`
   );
-  if (cinetpayOk) {
-    console.log(`  CinetPay API  : ${getCinetPayEnvironment() === 'production' ? 'api.cinetpay.co' : 'api.cinetpay.net (sandbox)'}`);
-  }
-  if (cinetpayOk && process.env.API_PUBLIC_URL) {
-    console.log(`  Webhook IPN   : ${process.env.API_PUBLIC_URL.replace(/\/$/, '')}/api/webhooks/cinetpay`);
-    console.log(`  IP whitelist  : GET …/api/cinetpay-setup (avec CINETPAY_SETUP_SECRET)`);
+  if (process.env.API_PUBLIC_URL) {
+    console.log(`  Webhook       : ${process.env.API_PUBLIC_URL.replace(/\/$/, '').replace(/\/api$/, '')}/webhooks/saspay`);
   }
 
   if (mongoOk) {
@@ -303,10 +307,29 @@ async function startServer(): Promise<void> {
 
   app.listen(PORT, () => {
     startPlannedExpenseScheduler();
+    void logPublicIp();
     if (!isProduction) {
       console.log(`👀 Mode ${NODE_ENV} — logs détaillés activés (morgan)\n`);
     }
   });
+}
+
+/** Affiche l'IP publique sortante au démarrage (local comme Railway) pour la whitelist SasPay. */
+async function logPublicIp(): Promise<void> {
+  const { ipv4, ipv6, source } = await detectServerPublicIp();
+  const mode = isSasPayConfigured() ? (isSasPayLive() ? 'live' : 'test') : 'non configuré';
+  console.log('──────────────────────────────────────────');
+  console.log('  🌍 IP PUBLIQUE SORTANTE (whitelist SasPay)');
+  if (ipv4 || ipv6) {
+    if (ipv4) console.log(`     IPv4 : ${ipv4}`);
+    if (ipv6) console.log(`     IPv6 : ${ipv6}`);
+    console.log(`     source : ${source ?? 'api64.ipify.org'}`);
+    console.log('     → app.saspay.me › Développeur › IP Whitelist');
+  } else {
+    console.log('     ⚠️  introuvable (pas d’accès Internet sortant ?)');
+  }
+  console.log(`  SasPay        : ${mode}${process.env.SASPAY_WEBHOOK_SECRET?.trim() ? ' · webhook signé ✅' : ' · ⚠️ SASPAY_WEBHOOK_SECRET manquant'}`);
+  console.log('──────────────────────────────────────────\n');
 }
 
 startServer().catch((err) => {

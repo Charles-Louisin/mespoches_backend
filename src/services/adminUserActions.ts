@@ -1,4 +1,5 @@
 import { invalidateUserCache } from '../middleware/auth';
+import { recordAccountDeleted } from '../utils/accountTrace';
 import AnalyticsEvent from '../models/AnalyticsEvent';
 import Budget from '../models/Budget';
 import Category from '../models/Category';
@@ -24,7 +25,7 @@ export async function revokeUserPremium(user: IUser): Promise<IUser> {
   await user.save();
   await SubscriptionPayment.updateMany(
     { user_id: user._id, status: 'pending' },
-    { $set: { status: 'failed', cinetpay_status: 'admin_revoked' } }
+    { $set: { status: 'failed', saspay_status: 'admin_revoked' } }
   );
   invalidateUserCache(user._id.toString());
   return user;
@@ -77,6 +78,8 @@ export async function setUserSuspended(user: IUser, suspended: boolean): Promise
 }
 
 export async function purgeUserAccount(userId: string): Promise<void> {
+  const existing = await User.findById(userId).select('email googleId');
+  if (existing) await recordAccountDeleted({ email: existing.email, googleId: existing.googleId ?? null });
   await Promise.all([
     Wallet.deleteMany({ user_id: userId }),
     Transaction.deleteMany({ user_id: userId }),

@@ -45,6 +45,14 @@ export interface IUser extends Document {
   tokenVersion: number;
   /** Compte bloqué par un admin : plus de connexion ni d’API. */
   suspendedAt: Date | null;
+  /** Double authentification : code envoyé par e-mail à chaque connexion par mot de passe sur un appareil non approuvé. */
+  twoFactorEnabled: boolean;
+  twoFactorCode?: string | null;
+  twoFactorExpires?: Date | null;
+  twoFactorAttempts?: number;
+  twoFactorSentAt?: Date | null;
+  /** Appareils approuvés 30 jours (empreinte SHA-256 du jeton, jamais le jeton). */
+  trustedDevices?: { hash: string; createdAt: Date; expiresAt: Date }[];
   created_at: Date;
   comparePassword(candidatePassword: string): Promise<boolean>;
 }
@@ -182,6 +190,23 @@ const userSchema = new Schema<IUser>(
     suspendedAt: {
       type: Date,
       default: null,
+    },
+    twoFactorEnabled: { type: Boolean, default: false },
+    twoFactorCode: { type: String, default: null, select: false },
+    twoFactorExpires: { type: Date, default: null, select: false },
+    twoFactorAttempts: { type: Number, default: 0, select: false },
+    twoFactorSentAt: { type: Date, default: null, select: false },
+    trustedDevices: {
+      type: [
+        {
+          _id: false,
+          hash: { type: String, required: true },
+          createdAt: { type: Date, default: Date.now },
+          expiresAt: { type: Date, required: true },
+        },
+      ],
+      default: [],
+      select: false,
     },
     created_at: {
       type: Date,

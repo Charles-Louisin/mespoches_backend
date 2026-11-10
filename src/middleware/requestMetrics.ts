@@ -80,6 +80,12 @@ export function requestTimeout(req: Request, res: Response, next: NextFunction):
     ? Number(process.env.AI_REQUEST_TIMEOUT_MS || 90_000)
     : Number(process.env.REQUEST_TIMEOUT_MS || 20_000)
   req.setTimeout(ms);
+  // Après la réponse 503 du délai dépassé, le handler peut encore finir et vouloir répondre :
+  // on ignore cette 2e réponse au lieu de lever ERR_HTTP_HEADERS_SENT (qui faisait tomber le serveur).
+  const json = res.json.bind(res);
+  const send = res.send.bind(res);
+  res.json = ((body?: unknown) => (res.headersSent ? res : json(body))) as typeof res.json;
+  res.send = ((body?: unknown) => (res.headersSent ? res : send(body))) as typeof res.send;
   res.setTimeout(ms, () => {
     if (res.headersSent) return;
     res.status(503).json({

@@ -19,7 +19,25 @@ import FeedbackMessage from '../models/FeedbackMessage';
 import { invalidateUserCache, protect } from '../middleware/auth';
 import { sendExistingAccountEmail } from '../utils/email';
 import { toPublicUser } from '../utils/userPayload';
-import { buildUsage, getNewUserTrialFields, syncExpiredPremium } from '../utils/subscription';
+import { buildUsage, syncExpiredPremium } from '../utils/subscription';
+import {
+  addTrustedDevice,
+  checkTwoFactorCode,
+  clearTwoFactorState,
+  createLoginChallenge,
+  isTrustedDevice,
+  maskEmail,
+  readLoginChallenge,
+  sendTwoFactorCode,
+  TWO_FACTOR_SELECT,
+} from '../utils/twoFactor';
+import {
+  deviceKeyFrom,
+  recordAccountDeleted,
+  recordAccountOpened,
+  startingPlanFor,
+  touchIdentity,
+} from '../utils/accountTrace';
 import {
   setVerificationCode,
   setPasswordResetCode,
@@ -302,7 +320,7 @@ router.post('/login', loginLimiter, async (req: Request, res: Response) => {
     const { email, password } = value;
     const emailNorm = email.trim().toLowerCase();
 
-    const user = await User.findOne({ email: emailNorm }).select('+password');
+    const user = await User.findOne({ email: emailNorm }).select(`+password ${TWO_FACTOR_SELECT}`);
     if (!user) {
       return res.status(401).json({
         success: false,
@@ -350,9 +368,35 @@ router.post('/login', loginLimiter, async (req: Request, res: Response) => {
       user.authProvider = 'both';
     }
 
+    // Double authentification : mot de passe correct, mais code e-mail exigé sur un appareil non approuvé.
+    if (user.twoFactorEnabled && !isTrustedDevice(user, String(req.headers['x-device-trust'] || ''))) {
+      const sent = await sendTwoFactorCode(user, 'login').catch((err) => {
+        console.error('Erreur envoi code 2FA:', err instanceof Error ? err.message : err);
+        return null;
+      });
+      if (!sent) {
+        return res.status(503).json({
+          success: false,
+          message: 'Impossible d’envoyer le code de connexion. Réessayez dans un instant.',
+        });
+      }
+      return res.status(401).json({
+        success: false,
+        code: 'TWO_FACTOR_REQUIRED',
+        message: 'Saisissez le code envoyé par e-mail.',
+        data: {
+          challenge: createLoginChallenge(user),
+          emailHint: maskEmail(user.email),
+          cooldownSeconds: sent.cooldownSeconds,
+        },
+      });
+    }
+
     recordLogin(user, req);
     await user.save();
     await syncExpiredPremium(user);
+    // Comptes antérieurs à la règle anti-abus : on mémorise leur identité dès la connexion.
+    void touchIdentity({ email: user.email, googleId: user.googleId, deviceKey: deviceKeyFrom(req) }, user.emailVerified);
 
     const token = generateToken(user);
 
@@ -477,6 +521,8 @@ router.post('/reset-password', otpLimiter, async (req: Request, res: Response) =
       user.authProvider = 'email';
     }
     await revokeAllSessions(user);
+    // Mot de passe réinitialisé : les appareils approuvés (2FA) devront à nouveau saisir un code.
+    user.trustedDevices = [];
     await user.save();
     invalidateUserCache(String(user._id));
 
@@ -497,6 +543,115 @@ router.post('/reset-password', otpLimiter, async (req: Request, res: Response) =
     });
   }
 });
+
+const twoFactorLoginSchema = Joi.object({
+  challenge: Joi.string().max(2048).required(),
+  code: Joi.string().pattern(/^\d{6}$/).required(),
+  trustDevice: Joi.boolean().default(false),
+});
+
+async function userFromChallenge(challenge: string) {
+  const parsed = readLoginChallenge(challenge);
+  if (!parsed) return null;
+  const user = await User.findById(parsed.userId).select(TWO_FACTOR_SELECT);
+  if (!user || (user.tokenVersion ?? 0) !== parsed.tv || !user.twoFactorEnabled || user.suspendedAt) return null;
+  return user;
+}
+
+/** Étape 2 de la connexion : code reçu par e-mail. */
+router.post('/login/2fa', otpLimiter, async (req: Request, res: Response) => {
+  try {
+    const { error, value } = twoFactorLoginSchema.validate(req.body);
+    if (error) return res.status(400).json({ success: false, message: 'Code invalide (6 chiffres requis)' });
+    const user = await userFromChallenge(value.challenge);
+    if (!user) {
+      return res.status(401).json({ success: false, code: 'CHALLENGE_EXPIRED', message: 'Session de connexion expirée. Reconnectez-vous.' });
+    }
+    const result = await checkTwoFactorCode(user, value.code, 'login');
+    if (result === 'locked') {
+      return res.status(429).json({ success: false, code: 'OTP_LOCKED', message: 'Trop de codes incorrects. Demandez un nouveau code.' });
+    }
+    if (result !== 'ok') return res.status(400).json({ success: false, message: 'Code incorrect ou expiré' });
+
+    const deviceTrust = value.trustDevice ? addTrustedDevice(user) : null;
+    recordLogin(user, req);
+    await user.save();
+    await syncExpiredPremium(user);
+    void touchIdentity({ email: user.email, googleId: user.googleId, deviceKey: deviceKeyFrom(req) }, user.emailVerified);
+    return res.json({
+      success: true,
+      data: { user: toPublicUser(user), token: generateToken(user), ...(deviceTrust ? { deviceTrust } : {}) },
+    });
+  } catch (error) {
+    console.error('Erreur login 2FA:', error instanceof Error ? error.message : error);
+    return res.status(500).json({ success: false, message: 'Erreur lors de la connexion' });
+  }
+});
+
+router.post('/login/2fa/resend', otpLimiter, async (req: Request, res: Response) => {
+  try {
+    const challenge = typeof req.body?.challenge === 'string' ? req.body.challenge : '';
+    const user = await userFromChallenge(challenge);
+    if (!user) {
+      return res.status(401).json({ success: false, code: 'CHALLENGE_EXPIRED', message: 'Session de connexion expirée. Reconnectez-vous.' });
+    }
+    const sent = await sendTwoFactorCode(user, 'login');
+    return res.json({ success: true, data: { cooldownSeconds: sent.cooldownSeconds } });
+  } catch (error) {
+    console.error('Erreur renvoi 2FA:', error instanceof Error ? error.message : error);
+    return res.status(503).json({ success: false, message: 'Impossible d’envoyer le code. Réessayez dans un instant.' });
+  }
+});
+
+/** Réglages : envoie un code pour activer ou désactiver la double authentification. */
+router.post('/2fa/code', protect, otpLimiter, async (req: Request, res: Response) => {
+  try {
+    const purpose = req.body?.purpose === 'disable' ? 'disable' : 'enable';
+    const user = await User.findById(req.user!._id).select(TWO_FACTOR_SELECT);
+    if (!user) return res.status(404).json({ success: false, message: 'Compte introuvable' });
+    if (purpose === 'enable' && user.twoFactorEnabled) {
+      return res.status(409).json({ success: false, message: 'La double authentification est déjà active.' });
+    }
+    if (purpose === 'disable' && !user.twoFactorEnabled) {
+      return res.status(409).json({ success: false, message: 'La double authentification est déjà désactivée.' });
+    }
+    const sent = await sendTwoFactorCode(user, purpose);
+    return res.json({ success: true, data: { cooldownSeconds: sent.cooldownSeconds, emailHint: maskEmail(user.email) } });
+  } catch (error) {
+    console.error('Erreur code 2FA:', error instanceof Error ? error.message : error);
+    return res.status(503).json({ success: false, message: 'Impossible d’envoyer le code. Réessayez dans un instant.' });
+  }
+});
+
+async function toggleTwoFactor(req: Request, res: Response, enable: boolean) {
+  try {
+    const code = String(req.body?.code || '');
+    const user = await User.findById(req.user!._id).select(TWO_FACTOR_SELECT);
+    if (!user) return res.status(404).json({ success: false, message: 'Compte introuvable' });
+    const result = await checkTwoFactorCode(user, code, enable ? 'enable' : 'disable');
+    if (result === 'locked') {
+      return res.status(429).json({ success: false, code: 'OTP_LOCKED', message: 'Trop de codes incorrects. Demandez un nouveau code.' });
+    }
+    if (result !== 'ok') return res.status(400).json({ success: false, message: 'Code incorrect ou expiré' });
+    user.twoFactorEnabled = enable;
+    clearTwoFactorState(user);
+    // L'appareil qui active la protection est approuvé d'office (pas de code à la prochaine ouverture).
+    const deviceTrust = enable ? addTrustedDevice(user) : null;
+    await user.save();
+    invalidateUserCache(String(user._id));
+    return res.json({
+      success: true,
+      message: enable ? 'Double authentification activée' : 'Double authentification désactivée',
+      data: { user: toPublicUser(user), ...(deviceTrust ? { deviceTrust } : {}) },
+    });
+  } catch (error) {
+    console.error('Erreur bascule 2FA:', error instanceof Error ? error.message : error);
+    return res.status(500).json({ success: false, message: 'Erreur lors de la mise à jour' });
+  }
+}
+
+router.post('/2fa/enable', protect, otpLimiter, (req: Request, res: Response) => toggleTwoFactor(req, res, true));
+router.post('/2fa/disable', protect, otpLimiter, (req: Request, res: Response) => toggleTwoFactor(req, res, false));
 
 router.post('/verify-email', otpLimiter, async (req: Request, res: Response) => {
   try {
@@ -550,18 +705,25 @@ router.post('/verify-email', otpLimiter, async (req: Request, res: Response) => 
     user.verificationCode = null;
     user.verificationCodeExpires = null;
     user.verificationAttempts = 0;
-    // L'essai Premium commence uniquement après vérification de l'email.
-    Object.assign(user, getNewUserTrialFields());
+    // L'essai Premium commence après vérification de l'email — une seule fois par identité
+    // (email normalisé, appareil) : un compte supprimé puis recréé démarre en gratuit.
+    const identity = { email: user.email, deviceKey: deviceKeyFrom(req) };
+    const start = await startingPlanFor(identity);
+    Object.assign(user, start.fields);
     await user.save();
+    await recordAccountOpened(identity, start.trialGranted);
 
     const token = generateToken(user);
 
     return res.status(200).json({
       success: true,
-      message: 'Email vérifié avec succès',
+      message: start.trialGranted
+        ? 'Email vérifié avec succès'
+        : 'Email vérifié. Vous avez déjà profité de l’essai gratuit : votre compte démarre en version gratuite.',
       data: {
         user: toPublicUser(user),
         token,
+        trialGranted: start.trialGranted,
       },
     });
   } catch (error) {
@@ -685,6 +847,13 @@ router.patch('/me', protect, async (req: Request, res: Response) => {
 router.delete('/me', protect, async (req: Request, res: Response) => {
   try {
     const userId = req.user!._id;
+    // La trace (empreintes, sans donnée lisible) survit à la suppression : pas de second essai gratuit.
+    const full = await User.findById(userId).select('email googleId');
+    await recordAccountDeleted({
+      email: full?.email ?? req.user!.email,
+      googleId: full?.googleId ?? null,
+      deviceKey: deviceKeyFrom(req),
+    });
 
     await Promise.all([
       Transaction.deleteMany({ user_id: userId }),
@@ -857,6 +1026,7 @@ async function completeGoogleLogin(
   const name = (payload.name || payload.given_name || '').trim();
 
   let user = await User.findOne({ googleId });
+  let createdIdentity: { identity: { email: string; googleId: string; deviceKey: string | null }; trialGranted: boolean } | null = null;
 
   if (!user) {
     const byEmail = await User.findOne({ email }).select('+password');
@@ -874,14 +1044,17 @@ async function completeGoogleLogin(
       if (name && !byEmail.name) byEmail.name = name;
       user = byEmail;
     } else {
+      const identity = { email, googleId, deviceKey: deviceKeyFrom(req) };
+      const start = await startingPlanFor(identity);
       user = new User({
         email,
         name: name || undefined,
         googleId,
         authProvider: 'google',
         emailVerified: true,
-        ...getNewUserTrialFields(),
+        ...start.fields,
       });
+      createdIdentity = { identity, trialGranted: start.trialGranted };
     }
   } else {
     if (!user.emailVerified) {
@@ -908,6 +1081,11 @@ async function completeGoogleLogin(
   recordLogin(user, req);
   await user.save();
   await syncExpiredPremium(user);
+  if (createdIdentity) {
+    await recordAccountOpened(createdIdentity.identity, createdIdentity.trialGranted);
+  } else {
+    void touchIdentity({ email: user.email, googleId: user.googleId, deviceKey: deviceKeyFrom(req) }, user.emailVerified);
+  }
 
   const token = generateToken(user);
 

@@ -38,10 +38,14 @@ export async function protect(
   ) {
     try {
       token = req.headers.authorization.split(' ')[1];
-      const decoded = jwt.verify(
-        token,
-        process.env.JWT_SECRET as string
-      ) as JwtPayload;
+      const decoded = jwt.verify(token, process.env.JWT_SECRET as string, {
+        algorithms: ['HS256'],
+      }) as JwtPayload & { purpose?: string };
+      // Seuls les jetons de session sont acceptés (pas un jeton d'étape 2FA ou autre usage).
+      if (decoded.purpose || !decoded.id) {
+        res.status(401).json({ success: false, code: 'SESSION_REVOKED', message: 'Session invalide' });
+        return;
+      }
 
       const tv = decoded.tv ?? 0;
       const key = cacheKey(decoded.id, tv);

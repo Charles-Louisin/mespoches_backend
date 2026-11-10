@@ -6,6 +6,8 @@ import type { ImageAnalysisResult } from './ImageAnalysisService'
 import type { ParsedMobileMoney } from '../../utils/mobileMoneySmsParser'
 import type { AiVoiceTransaction } from './types'
 import { resolveDraftPlacement } from '../smsHabitService'
+import { groupItemsIntoBlocks } from './AIService'
+import { matchCatalogCategory, type CategoryCatalog } from '../../utils/categoryCatalog'
 
 /**
  * Crée uniquement des brouillons (status pending = pending_validation).
@@ -57,6 +59,27 @@ export class TransactionDraftService {
     })
   }
 
+  /** Catégorie du compte pour un bloc : nom proposé par l'IA (même type), sinon habitudes / indice. */
+  private async placeBlock(
+    userId: Types.ObjectId,
+    type: 'income' | 'expense',
+    description: string,
+    categoryName: string | null,
+    catalog?: CategoryCatalog
+  ): Promise<{ wallet_id: Types.ObjectId | null; category_id: Types.ObjectId | null }> {
+    const placement = await resolveDraftPlacement(userId, type, description, categoryName)
+    const matched = catalog ? matchCatalogCategory(catalog, type, categoryName) : null
+    return { wallet_id: placement.wallet_id, category_id: matched?.id ?? placement.category_id }
+  }
+
+  /** Libellé d'un bloc : ses lignes (« Pain, riz, tomates »), sinon la catégorie. */
+  private blockDescription(items: Array<{ description: string }>, fallback: string): string {
+    const names = [...new Set(items.map((i) => i.description.trim()).filter(Boolean))]
+    if (!names.length) return fallback
+    const joined = names.slice(0, 5).join(', ')
+    return (names.length > 5 ? `${joined}… (${names.length} lignes)` : joined).slice(0, 200)
+  }
+
   private mapLineItems(
     items: Array<{
       description: string
@@ -81,62 +104,35 @@ export class TransactionDraftService {
     }))
   }
 
-  private groupItemsByType<T extends { type: 'income' | 'expense' }>(items: T[]) {
-    return {
-      expense: items.filter((i) => i.type === 'expense'),
-      income: items.filter((i) => i.type === 'income'),
-    }
-  }
-
   /**
-   * Ticket / note : 1 pending par type (dépense et/ou revenu),
-   * chacune avec toutes ses lignes (articles).
+   * Photo : une proposition par BLOC (même sens + même catégorie du compte), chacune avec ses lignes.
+   * Ex. relevé : « Alimentation » (dépenses), « Transport » (dépenses), « Salaire » (revenu).
    */
   async createFromImageAnalysis(params: {
     userId: Types.ObjectId
     analysis: ImageAnalysisResult
+    catalog?: CategoryCatalog
   }): Promise<IPendingTransaction[]> {
     const analysis = params.analysis
-    const grouped = this.groupItemsByType(analysis.items)
     const created: IPendingTransaction[] = []
-    const mixed = grouped.expense.length > 0 && grouped.income.length > 0
-
-    for (const type of ['expense', 'income'] as const) {
-      const items = grouped[type]
-      if (!items.length) continue
-      const total = items.reduce((s, i) => s + i.amount, 0)
-      const firstDate = items.find((i) => i.date)?.date
-      const n = items.length
-      let description: string
-      if (mixed) {
-        description =
-          type === 'expense'
-            ? analysis.summary?.trim()
-              ? `${analysis.summary.trim()} — dépenses`
-              : `Dépenses — ${n} articles`
-            : `Revenus — ${n} lignes`
-      } else {
-        description =
-          analysis.summary?.trim() ||
-          (n > 1
-            ? type === 'expense'
-              ? `Courses — ${n} articles`
-              : `Reçus — ${n} lignes`
-            : items[0].description)
-      }
-
-      const placement = await resolveDraftPlacement(params.userId, type, description)
-
+    for (const block of groupItemsIntoBlocks(analysis.items)) {
+      const total = block.items.reduce((s, i) => s + i.amount, 0)
+      const firstDate = block.items.find((i) => i.date)?.date
+      const description = this.blockDescription(
+        block.items,
+        block.category || (block.type === 'expense' ? 'Dépense' : 'Revenu')
+      )
+      const placement = await this.placeBlock(params.userId, block.type, description, block.category, params.catalog)
       const doc = await PendingTransaction.create({
         user_id: params.userId,
         status: 'pending',
         source: 'ai_scan',
         source_type: 'image',
-        type,
+        type: block.type,
         amount: total,
         operator: 'unknown',
         counterparty: '',
-        description: description.slice(0, 200),
+        description,
         date: firstDate ? new Date(firstDate) : new Date(),
         raw_text: analysis.summary,
         wallet_id: placement.wallet_id,
@@ -146,12 +142,24 @@ export class TransactionDraftService {
         ai_enriched: true,
         document_type: analysis.document_type,
         low_confidence_warning: analysis.warning,
-        ai_items: this.mapLineItems(items),
+        ai_items: this.lineItemsWithCategories(block.items, block.type, placement.category_id, params.catalog),
       })
       created.push(doc)
     }
-
     return created
+  }
+
+  /** Lignes avec leur catégorie : celle proposée pour la ligne si elle existe dans le compte, sinon celle du bloc. */
+  private lineItemsWithCategories(
+    items: Array<{ description: string; amount: number; quantity?: number; unit_amount?: number | null; type: 'income' | 'expense'; category?: string | null }>,
+    type: 'income' | 'expense',
+    blockCategoryId: Types.ObjectId | null,
+    catalog?: CategoryCatalog
+  ) {
+    return this.mapLineItems(items).map((line, idx) => ({
+      ...line,
+      category_id: (catalog ? matchCatalogCategory(catalog, type, items[idx].category)?.id : null) ?? blockCategoryId,
+    }))
   }
 
   async createFromVoiceTransactions(params: {
@@ -160,6 +168,7 @@ export class TransactionDraftService {
     transactions: AiVoiceTransaction[]
     warning?: string
     fromParser?: boolean
+    catalog?: CategoryCatalog
   }): Promise<IPendingTransaction[]> {
     const created: IPendingTransaction[] = []
     for (const tx of params.transactions) {
@@ -167,12 +176,7 @@ export class TransactionDraftService {
       const amount =
         lineItems.length > 0 ? lineItems.reduce((s, i) => s + i.amount, 0) : tx.amount
       const description = tx.description || (tx.type === 'income' ? 'Revenu vocal' : 'Dépense vocale')
-      const placement = await resolveDraftPlacement(
-        params.userId,
-        tx.type,
-        description,
-        tx.category_hint
-      )
+      const placement = await this.placeBlock(params.userId, tx.type, description, tx.category_hint, params.catalog)
 
       const doc = await PendingTransaction.create({
         user_id: params.userId,
@@ -193,7 +197,9 @@ export class TransactionDraftService {
         ai_enriched: !params.fromParser,
         document_type: 'voice_note',
         low_confidence_warning: params.warning,
-        ai_items: lineItems,
+        ai_items: tx.items?.length
+          ? this.lineItemsWithCategories(tx.items, tx.type, placement.category_id, params.catalog)
+          : lineItems,
       })
       created.push(doc)
     }

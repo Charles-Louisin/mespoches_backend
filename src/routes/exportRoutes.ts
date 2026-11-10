@@ -58,6 +58,28 @@ function exportSince(user: IUser, raw: unknown): Date | null {
   return since;
 }
 
+const MAX_RANGE_MS = 32 * 24 * 60 * 60 * 1000;
+const MAX_RANGES = 800;
+
+/** Plages explicites (début inclus, fin exclue) choisies depuis l'inscription. */
+function exportRanges(user: IUser, raw: unknown): { date: { $gte: Date; $lt: Date } }[] | 'invalid' | null {
+  if (!user || !canExportRange(user)) return null;
+  const text = String(raw || '').trim();
+  if (!text) return null;
+  const parts = text.split(',').map((part) => part.trim()).filter(Boolean).slice(0, MAX_RANGES);
+  const ranges: { date: { $gte: Date; $lt: Date } }[] = [];
+  for (const part of parts) {
+    const [fromRaw, toRaw] = part.split('..');
+    const start = new Date(fromRaw || '');
+    const end = new Date(toRaw || '');
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) continue;
+    if (end.getTime() <= start.getTime()) continue;
+    if (end.getTime() - start.getTime() > MAX_RANGE_MS) continue;
+    ranges.push({ date: { $gte: start, $lt: end } });
+  }
+  return ranges.length ? ranges : 'invalid';
+}
+
 router.get('/transactions', protect, premiumOnly, exportLimiter, async (req: Request, res: Response) => {
   try {
     const format = (req.query.format as string) || 'csv';
@@ -65,12 +87,23 @@ router.get('/transactions', protect, premiumOnly, exportLimiter, async (req: Req
     if (denied) {
       return sendLimitError(res, denied.message, { code: denied.code, data: denied.data });
     }
-    const since = exportSince(req.user!, req.query.days);
+    const ranges = exportRanges(req.user!, req.query.ranges);
+    if (ranges === 'invalid') {
+      return res.status(400).json({
+        success: false,
+        message: 'Choisissez au moins une période valide.',
+      });
+    }
+    const since = ranges ? null : exportSince(req.user!, req.query.days);
+    const dateClause = ranges
+      ? { $or: ranges }
+      : since
+        ? { date: { $gte: since } }
+        : null;
 
     const transactions = await Transaction.find({
       user_id: req.user!._id,
-      ...listQuery,
-      ...(since ? { date: { $gte: since } } : {}),
+      $and: [listQuery, ...(dateClause ? [dateClause] : [])],
     })
       .populate('wallet_id', 'name')
       .populate('destination_wallet_id', 'name')

@@ -37,6 +37,63 @@ function parseLooseAmount(value: unknown): number | null {
   return Number.isFinite(n) && n > 0 ? n : null
 }
 
+/**
+ * Montant éventuellement signé : "-2 000", "(2 000)", "−1500", "+3000", -1500.
+ * Renvoie la valeur absolue et le signe lu (null si aucun).
+ */
+function parseSignedAmount(value: unknown): { amount: number; sign: '+' | '-' | null } | null {
+  if (typeof value === 'number' && Number.isFinite(value) && value !== 0) {
+    return { amount: Math.abs(value), sign: value < 0 ? '-' : null }
+  }
+  if (typeof value !== 'string') return null
+  let s = value.trim()
+  let sign: '+' | '-' | null = null
+  if (/^\(.*\)$/.test(s)) {
+    sign = '-'
+    s = s.slice(1, -1)
+  }
+  const m = /^([+\-−–])\s*/.exec(s)
+  if (m) {
+    sign = m[1] === '+' ? '+' : '-'
+    s = s.slice(m[0].length)
+  }
+  const amount = parseLooseAmount(s)
+  return amount ? { amount, sign } : null
+}
+
+/** Sens d'une ligne : un signe explicite l'emporte sur le type proposé. */
+function lineType(rawType: unknown, sign: '+' | '-' | null, signSeen: unknown): 'income' | 'expense' {
+  const seen = signSeen === '+' || signSeen === '-' ? signSeen : null
+  const s = sign ?? seen
+  if (s === '-') return 'expense'
+  if (s === '+') return 'income'
+  return rawType === 'income' ? 'income' : 'expense'
+}
+
+function categoryName(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const v = value.trim()
+  if (!v || /^(null|aucune?|none|n\/a)$/i.test(v)) return null
+  return v.slice(0, 80)
+}
+
+/**
+ * Regroupe les lignes en blocs « même sens + même catégorie » (ordre d'apparition conservé).
+ * Les lignes sans catégorie forment un bloc par sens.
+ */
+export function groupItemsIntoBlocks(
+  items: AiImageItem[]
+): Array<{ type: 'income' | 'expense'; category: string | null; items: AiImageItem[] }> {
+  const blocks = new Map<string, { type: 'income' | 'expense'; category: string | null; items: AiImageItem[] }>()
+  for (const item of items) {
+    const cat = item.category?.trim() || null
+    const key = `${item.type}::${(cat || '').toLowerCase()}`
+    if (!blocks.has(key)) blocks.set(key, { type: item.type, category: cat, items: [] })
+    blocks.get(key)!.items.push(item)
+  }
+  return [...blocks.values()]
+}
+
 function normalizeDate(value: unknown): string | null {
   if (value == null) return null
   const s = String(value).trim()
@@ -109,13 +166,13 @@ export class AIService {
     }
   }
 
-  async analyzeImage(base64OrDataUrl: string, mimeType: string): Promise<AiImageExtraction> {
+  async analyzeImage(base64OrDataUrl: string, mimeType: string, categoriesBlock = ''): Promise<AiImageExtraction> {
     const dataUrl = base64OrDataUrl.startsWith('data:')
       ? base64OrDataUrl
       : `data:${mimeType || 'image/jpeg'};base64,${base64OrDataUrl}`
 
     const messages = this.prompts.imageMessages(
-      this.prompts.buildImageAnalysisPrompt(),
+      this.prompts.buildImageAnalysisPrompt(categoriesBlock),
       dataUrl
     )
 
@@ -199,9 +256,9 @@ export class AIService {
     }
   }
 
-  async analyzeVoiceText(spokenText: string): Promise<AiVoiceExtraction> {
+  async analyzeVoiceText(spokenText: string, categoriesBlock = ''): Promise<AiVoiceExtraction> {
     const messages = this.prompts.textMessages(
-      this.prompts.buildVoiceTransactionPrompt(spokenText)
+      this.prompts.buildVoiceTransactionPrompt(spokenText, categoriesBlock)
     )
     const { json } = await this.completeJson({
       purpose: 'voice_transaction',
@@ -209,6 +266,23 @@ export class AIService {
       messages,
     })
     const data = json as Record<string, unknown>
+    const flatItems = this.normalizeLineItems(data.items)
+    if (flatItems.length > 0 && !Array.isArray(data.transactions)) {
+      const blocks = groupItemsIntoBlocks(flatItems)
+      const confidence =
+        typeof data.confidence === 'number' ? Math.min(1, Math.max(0, data.confidence)) : 0.8
+      const transactions: AiVoiceTransaction[] = blocks.map((b) => ({
+        type: b.type,
+        description: this.voiceDescription(null, b.items),
+        category_hint: b.category,
+        date: b.items.find((i) => i.date)?.date ?? normalizeDate(data.date),
+        confidence,
+        amount: b.items.reduce((s, i) => s + i.amount, 0),
+        items: b.items,
+      }))
+      const detected = data.detected !== false && transactions.length > 0
+      return { detected, confidence, transactions: detected ? transactions : [] }
+    }
     const parsedTxs: AiVoiceTransaction[] = []
 
     const pushTx = (raw: Record<string, unknown>, fallbackType?: 'income' | 'expense') => {
@@ -316,8 +390,9 @@ export class AIService {
     const items: AiImageItem[] = []
     for (const row of raw) {
       const i = row as Record<string, unknown>
-      const lineAmount = parseLooseAmount(i.amount)
-      if (!lineAmount) continue
+      const signed = parseSignedAmount(i.amount)
+      if (!signed) continue
+      const lineAmount = signed.amount
       const quantity =
         typeof i.quantity === 'number' && i.quantity >= 1 ? Math.round(i.quantity) : 1
       const unitRaw = parseLooseAmount(i.unit_amount)
@@ -329,36 +404,29 @@ export class AIService {
         amount: lineAmount,
         quantity,
         unit_amount: unitRaw ?? (quantity > 1 ? lineAmount / quantity : lineAmount),
-        type: i.type === 'income' ? 'income' : 'expense',
+        type: lineType(i.type, signed.sign, i.sign_seen),
+        category: categoryName(i.category),
+        date: normalizeDate(i.date),
       })
     }
     return items
   }
 
-  /** Une transaction dépense + une transaction revenu, chacune avec toutes ses lignes. */
+  /** Regroupe les propositions par (sens, catégorie) : un bloc = une transaction avec ses lignes. */
   private mergeVoiceByType(txs: AiVoiceTransaction[]): AiVoiceTransaction[] {
-    const buckets: Record<'income' | 'expense', AiVoiceTransaction[]> = { income: [], expense: [] }
-    for (const tx of txs) buckets[tx.type].push(tx)
-    const merged: AiVoiceTransaction[] = []
-    for (const type of ['expense', 'income'] as const) {
-      const list = buckets[type]
-      if (!list.length) continue
-      const items = list.flatMap((t) => t.items)
-      const amount = items.reduce((s, i) => s + i.amount, 0)
-      merged.push({
-        type,
-        description: this.voiceDescription(
-          list[0].description,
-          items
-        ),
-        category_hint: list.find((t) => t.category_hint)?.category_hint ?? null,
-        date: list.find((t) => t.date)?.date ?? null,
-        confidence: list.reduce((s, t) => s + t.confidence, 0) / list.length,
-        amount,
-        items,
-      })
-    }
-    return merged
+    const flat = txs.flatMap((t) =>
+      t.items.map((i) => ({ ...i, type: t.type, category: i.category ?? t.category_hint ?? null, date: i.date ?? t.date }))
+    )
+    const conf = txs.length ? txs.reduce((s, t) => s + t.confidence, 0) / txs.length : 0.75
+    return groupItemsIntoBlocks(flat).map((b) => ({
+      type: b.type,
+      description: this.voiceDescription(null, b.items),
+      category_hint: b.category,
+      date: b.items.find((i) => i.date)?.date ?? null,
+      confidence: conf,
+      amount: b.items.reduce((s, i) => s + i.amount, 0),
+      items: b.items,
+    }))
   }
 
   formatError(err: unknown): string {
@@ -381,8 +449,9 @@ export class AIService {
     const items: AiImageItem[] = []
     for (const i of data.items || []) {
       if (!i || !i.description) continue
-      const amount = parseLooseAmount(i.amount)
-      if (!amount) continue
+      const signed = parseSignedAmount(i.amount)
+      if (!signed) continue
+      const amount = signed.amount
       const quantity =
         typeof (i as { quantity?: number }).quantity === 'number' &&
         (i as { quantity?: number }).quantity! >= 1
@@ -394,7 +463,8 @@ export class AIService {
         amount,
         quantity,
         unit_amount: unitRaw ?? (quantity > 1 ? amount / quantity : amount),
-        type: i.type === 'income' ? 'income' : 'expense',
+        type: lineType(i.type, signed.sign, (i as { sign_seen?: unknown }).sign_seen),
+        category: categoryName((i as { category?: unknown }).category),
         date: normalizeDate(i.date),
         currency: i.currency || 'XAF',
         confidence:

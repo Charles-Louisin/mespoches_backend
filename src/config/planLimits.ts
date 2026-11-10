@@ -105,3 +105,6 @@ export function nextTier(tier: SubscriptionTier): PaidTier | null {
   if (tier === 'pro_plus') return 'business';
   return null;
 }
+
+/** Rang des paliers (comparaison montée / descente de gamme). */
+export const TIER_RANK: Record<SubscriptionTier, number> = { free: 0, pro: 1, pro_plus: 2, business: 3 };

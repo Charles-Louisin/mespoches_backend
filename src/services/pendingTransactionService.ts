@@ -22,6 +22,8 @@ import {
 import { LOW_CONFIDENCE_THRESHOLD } from '../config/aiModels';
 import { maybeSuggestRecurrence } from './recurrenceSuggestionService';
 import { resolveOwnedCategoryId } from '../utils/ownership';
+import { withLineCategories } from '../utils/lineCategories';
+import { catalogForPrompt, getCategoryCatalog } from '../utils/categoryCatalog';
 
 async function buildFromParsed(
   userId: Types.ObjectId,
@@ -134,10 +136,13 @@ export async function createFromAiScan(
   base64: string,
   mimeType: string
 ): Promise<AiScanCreateResult> {
-  const analysis = await imageAnalysisService.analyze(base64, mimeType);
+  // Les catégories du compte guident l'IA, puis chaque bloc est rattaché à la bonne catégorie.
+  const catalog = await getCategoryCatalog(userId);
+  const analysis = await imageAnalysisService.analyze(base64, mimeType, catalogForPrompt(catalog));
   const items = await transactionDraftService.createFromImageAnalysis({
     userId,
     analysis,
+    catalog,
   });
   if (!items.length) {
     throw new Error('Rien de lisible sur la photo. Rapprochez le ticket et réessayez.');
@@ -167,6 +172,7 @@ export async function validatePendingTransaction(
       quantity?: number;
       unit_amount?: number;
       type?: 'income' | 'expense';
+      category_id?: string | null;
     }>;
   }
 ): Promise<{ pending: IPendingTransaction; transactionId: Types.ObjectId }> {
@@ -207,9 +213,14 @@ export async function validatePendingTransaction(
   }
 
   if (updates?.ai_items && updates.ai_items.length > 0) {
-    // Montants inchangés : on ne remplace que les libellés par index.
+    // Montants inchangés : on remplace les libellés et les catégories de ligne par index.
     const base = pending.ai_items?.length ? pending.ai_items : updates.ai_items;
+    const lineCats = await withLineCategories(userId, type, updates.ai_items);
     pending.ai_items = base.map((item, idx) => ({
+      category_id:
+        updates.ai_items![idx]?.category_id !== undefined
+          ? lineCats[idx]?.category_id ?? null
+          : ((item as { category_id?: Types.ObjectId | null }).category_id ?? null),
       description:
         updates.ai_items![idx]?.description?.trim() ||
         item.description ||
@@ -221,12 +232,21 @@ export async function validatePendingTransaction(
     }));
   }
 
-  const line_items = (pending.ai_items || []).map((i) => ({
+  // Revérifie chaque catégorie de ligne contre le type FINAL (ex. dépense passée en revenu).
+  const line_items = (
+    await withLineCategories(
+      userId,
+      type,
+      // Sous-documents Mongoose → objets simples (sinon le spread ne copie pas description/amount).
+      (pending.ai_items || []).map((x) => (typeof (x as { toObject?: () => unknown }).toObject === 'function' ? (x as unknown as { toObject: () => typeof x }).toObject() : x))
+    )
+  ).map((i) => ({
     description: i.description,
     amount: i.amount,
     quantity: i.quantity && i.quantity > 1 ? i.quantity : 1,
     unit_amount: i.unit_amount,
     type: i.type,
+    category_id: i.category_id ?? null,
   }));
 
   const tx = await Transaction.create({
@@ -254,6 +274,21 @@ export async function validatePendingTransaction(
   pending.category_id = categoryId ? new Types.ObjectId(categoryId) : null;
   await pending.save();
 
+  // Apprentissage des habitudes + suggestion de récurrence (peut appeler l'IA) : en arrière-plan.
+  // La transaction est déjà enregistrée ; l'utilisateur n'attend plus ces traitements.
+  void learnAfterValidation(userId, pending, { type, walletId: String(walletId), categoryId, description, amount, userCorrections: !!updates }).catch(
+    (err) => console.warn('[learnAfterValidation] ignoré :', err instanceof Error ? err.message : err)
+  );
+
+  return { pending, transactionId: tx._id };
+}
+
+async function learnAfterValidation(
+  userId: Types.ObjectId,
+  pending: IPendingTransaction,
+  v: { type: 'income' | 'expense'; walletId: string; categoryId: string | null; description: string; amount: number; userCorrections: boolean }
+): Promise<void> {
+  const { type, walletId, categoryId, description, amount } = v;
   const User = (await import('../models/User')).default;
   const { isPremiumUser } = await import('../utils/subscription');
   const user = await User.findById(userId);
@@ -275,7 +310,7 @@ export async function validatePendingTransaction(
       sender_phone: reparsed?.sender_phone,
       recipient_name: reparsed?.recipient_name,
       recipient_phone: reparsed?.recipient_phone,
-      userCorrections: !!updates,
+      userCorrections: v.userCorrections,
     });
 
     try {
@@ -284,8 +319,6 @@ export async function validatePendingTransaction(
       console.warn('[RecurrenceSuggest] skipped:', err);
     }
   }
-
-  return { pending, transactionId: tx._id };
 }
 
 export async function createFromVoiceNote(
@@ -308,9 +341,10 @@ export async function createFromVoiceNote(
   }
 
   const parsed = parseVoiceNote(text);
+  const catalog = await getCategoryCatalog(userId);
 
   try {
-    const analysis = await aiService.analyzeVoiceText(text);
+    const analysis = await aiService.analyzeVoiceText(text, catalogForPrompt(catalog));
     if (!analysis.detected || analysis.transactions.length === 0) {
       throw new Error('Impossible de détecter une transaction dans la note vocale');
     }
@@ -325,6 +359,7 @@ export async function createFromVoiceNote(
       spokenText: text,
       transactions: analysis.transactions,
       warning,
+      catalog,
     });
   } catch (err) {
     if (parsed.detected && parsed.amount) {

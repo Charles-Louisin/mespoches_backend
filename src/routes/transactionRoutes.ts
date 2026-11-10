@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { withLineCategories } from '../utils/lineCategories';
 import Joi from 'joi';
 import mongoose, { FilterQuery, Types } from 'mongoose';
 import Transaction, { ITransaction, TransactionType } from '../models/Transaction';
@@ -26,6 +27,7 @@ const lineItemSchema = Joi.object({
   quantity: Joi.number().integer().min(1).optional(),
   unit_amount: Joi.number().positive().optional(),
   type: Joi.string().valid('income', 'expense').optional(),
+  category_id: Joi.string().hex().length(24).allow(null, '').optional(),
 }).unknown(true);
 
 const baseSchema = {
@@ -65,6 +67,7 @@ interface TransactionInput {
     quantity?: number;
     unit_amount?: number;
     type?: 'income' | 'expense';
+    category_id?: string | null;
   }>;
 }
 
@@ -87,13 +90,14 @@ async function createTransactionAndUpdateWallet({
     throw new Error('Portefeuille introuvable');
   }
 
-  const lineItems = (data.line_items || [])
+  const lineItems = (await withLineCategories(userId, type, data.line_items || []))
     .map((item) => ({
       description: String(item.description || '').trim(),
       amount: Number(item.amount) || 0,
       quantity: item.quantity ?? 1,
       unit_amount: item.unit_amount,
       type: item.type || type,
+      category_id: item.category_id,
     }))
     .filter((item) => item.amount > 0);
 
@@ -732,6 +736,7 @@ const transactionUpdateSchema = Joi.object({
       quantity: Joi.number().integer().min(1).optional(),
       unit_amount: Joi.number().positive().optional(),
       type: Joi.string().valid('income', 'expense').optional(),
+      category_id: Joi.string().hex().length(24).allow(null, '').optional(),
     }).unknown(true)
   ).optional(),
 });
@@ -794,13 +799,20 @@ router.put('/:id', protect, async (req: Request, res: Response) => {
     }
     if (value.line_items !== undefined) {
       const existing = transaction.line_items || [];
-      transaction.line_items = (value.line_items as Array<{
+      const incoming = value.line_items as Array<{
         description?: string;
         amount?: number;
         quantity?: number;
         unit_amount?: number;
         type?: 'income' | 'expense';
-      }>).map((item, idx) => {
+        category_id?: string | null;
+      }>;
+      const withCats = await withLineCategories(
+        req.user!._id,
+        transaction.type === 'income' ? 'income' : 'expense',
+        incoming
+      );
+      transaction.line_items = incoming.map((item, idx) => {
         const prev = existing[idx];
         return {
           description: String(item.description || prev?.description || '').trim(),
@@ -808,8 +820,12 @@ router.put('/:id', protect, async (req: Request, res: Response) => {
           quantity: prev?.quantity ?? item.quantity ?? 1,
           unit_amount: prev?.unit_amount ?? item.unit_amount,
           type: prev?.type ?? item.type,
+          // Catégorie modifiable ligne par ligne ; non fournie → on garde l'ancienne.
+          category_id:
+            item.category_id !== undefined ? withCats[idx].category_id : (prev?.category_id ?? null),
         };
       });
+      transaction.markModified('line_items');
     }
 
     const walletChanged = newWalletId !== oldWalletId;

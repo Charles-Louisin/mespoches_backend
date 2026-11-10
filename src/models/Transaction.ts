@@ -20,6 +20,8 @@ export interface ITransaction extends Document {
     quantity?: number;
     unit_amount?: number;
     type?: 'income' | 'expense';
+    /** Catégorie propre à la ligne (même type que la transaction) ; null = celle de la transaction. */
+    category_id?: Types.ObjectId | null;
   }>;
   date: Date;
   balance_before: number;
@@ -88,6 +90,7 @@ const transactionSchema = new Schema<ITransaction>(
           quantity: { type: Number, default: 1 },
           unit_amount: { type: Number },
           type: { type: String, enum: ['income', 'expense'] },
+          category_id: { type: Schema.Types.ObjectId, ref: 'Category', default: null },
         },
       ],
       default: [],

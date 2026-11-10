@@ -14,8 +14,8 @@ export type ImageAnalysisResult = AiImageExtraction & {
 export class ImageAnalysisService {
   constructor(private readonly ai: AIService = aiService) {}
 
-  async analyze(base64: string, mimeType: string): Promise<ImageAnalysisResult> {
-    const extraction = await this.ai.analyzeImage(base64, mimeType)
+  async analyze(base64: string, mimeType: string, categoriesBlock = ''): Promise<ImageAnalysisResult> {
+    const extraction = await this.ai.analyzeImage(base64, mimeType, categoriesBlock)
 
     const lowConfidence = extraction.confidence < LOW_CONFIDENCE_THRESHOLD
 

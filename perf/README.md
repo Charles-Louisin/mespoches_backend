@@ -25,7 +25,7 @@ Dashboard service → **Metrics** :
 - Request volume / latence (si exposé)
 - Restarts / crash loop
 
-Pendant un test : `GET /api/metrics` avec header `X-Setup-Secret` (même secret que CinetPay setup). Réponse : RSS, heap, p95 par route, pool Mongo, requêtes lentes.
+Pendant un test : `GET /api/metrics` avec header `X-Setup-Secret` (secret OPS_SETUP_SECRET). Réponse : RSS, heap, p95 par route, pool Mongo, requêtes lentes.
 
 Les routes > 500 ms sont aussi loguées `[slow]`.
 

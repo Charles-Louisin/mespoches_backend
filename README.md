@@ -18,11 +18,12 @@ API Express déployée séparément du frontend Next.js.
 
 Copiez `.env.example` dans les variables d'environnement Render.
 
-## Paiement Premium (CinetPay)
+## Paiement Premium (SasPay)
 
-1. Renseignez `CINETPAY_API_KEY` et `CINETPAY_SITE_ID` dans `backend/.env`
-2. `APP_URL` = URL du frontend (ex. `http://localhost:3000`)
-3. `API_PUBLIC_URL` = URL publique de cette API (webhook : `{API_PUBLIC_URL}/api/webhooks/cinetpay`)
-4. En local, le webhook CinetPay nécessite une URL accessible depuis Internet (ex. [ngrok](https://ngrok.com) sur le port 5000)
+1. Renseignez `SASPAY_SECRET_KEY` (`sk_test_…` en recette, `sk_live_…` en production) et `SASPAY_WEBHOOK_SECRET` dans `backend/.env`
+2. `APP_URL` = URL du site (page de retour `/paiement/retour`, ex. `https://www.mespoches.store`)
+3. Webhook à déclarer dans app.saspay.me : `{API}/webhooks/saspay` (événements `transaction.success`, `transaction.failed`)
+4. Frais : `fee_charge_mode=ADD_ON` — le client paie les frais, le marchand reçoit le prix affiché
+5. IP sortante (whitelist SasPay) : affichée au démarrage, ou `GET /api/saspay-setup` avec le header `X-Setup-Secret: $OPS_SETUP_SECRET`
 
-Routes : `GET /api/subscription/plans`, `POST /api/subscription/checkout`, `GET /api/subscription/verify`, `POST /api/webhooks/cinetpay`
+Routes : `GET /api/subscription/plans`, `POST /api/subscription/checkout`, `GET /api/subscription/verify`, `GET /api/subscription/return-status`, `POST /webhooks/saspay`

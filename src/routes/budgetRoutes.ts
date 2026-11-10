@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { categorySplitStages, matchCategoryOrLines } from '../utils/categorySplit';
 import Joi from 'joi';
 import Budget from '../models/Budget';
 import Category from '../models/Category';
@@ -44,11 +45,14 @@ router.get('/', async (req: Request, res: Response) => {
             $match: {
               user_id: req.user!._id,
               type: 'expense',
-              category_id: { $in: categoryIds },
+              ...matchCategoryOrLines(categoryIds),
               date: { $gte: start, $lte: end },
             },
           },
-          { $group: { _id: '$category_id', total: { $sum: '$amount' } } },
+          // Lignes d'une même transaction réparties dans leurs catégories respectives.
+          ...categorySplitStages(),
+          { $match: { '__parts.cat': { $in: categoryIds } } },
+          { $group: { _id: '$__parts.cat', total: { $sum: '$__parts.amount' } } },
         ])
       : [];
 

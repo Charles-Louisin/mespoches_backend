@@ -39,6 +39,7 @@ export interface IPendingTransaction extends Document {
     quantity?: number;
     unit_amount?: number;
     type: 'income' | 'expense';
+    category_id?: Types.ObjectId | null;
   }>;
   validated_transaction_id: Types.ObjectId | null;
   created_at: Date;
@@ -107,6 +108,7 @@ const pendingTransactionSchema = new Schema<IPendingTransaction>(
           quantity: { type: Number, default: 1 },
           unit_amount: { type: Number },
           type: { type: String, enum: ['income', 'expense'] },
+          category_id: { type: Schema.Types.ObjectId, ref: 'Category', default: null },
         },
       ],
       default: [],

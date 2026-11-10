@@ -1,14 +1,10 @@
 import User from '../models/User';
+import { invalidateUserCache } from '../middleware/auth';
 import SubscriptionPayment, {
   type ISubscriptionPayment,
   type BillingPeriod,
 } from '../models/SubscriptionPayment';
-import {
-  getCinetPayPaymentStatus,
-  isCinetPayConfigured,
-  isCinetPayPaymentFailed,
-  isCinetPayPaymentSuccess,
-} from './cinetpay';
+import { getSasPayCheckoutStatus, isSasPayConfigured, verifySasPayPayment } from './saspay';
 
 export function computePremiumUntil(
   currentUntil: Date | null | undefined,
@@ -39,8 +35,21 @@ export async function fulfillSubscriptionPayment(
     };
   }
 
+  // Verrou atomique : le webhook et la vérification au retour peuvent arriver en même temps,
+  // un seul des deux prolonge l'abonnement.
+  const claimed = await SubscriptionPayment.findOneAndUpdate(
+    { _id: payment._id, status: { $ne: 'completed' } },
+    { status: 'completed', completed_at: new Date() },
+    { new: true }
+  );
+  if (!claimed) {
+    const current = await User.findById(payment.user_id);
+    return { activated: false, premiumUntil: current?.premiumUntil ?? null };
+  }
+
   const user = await User.findById(payment.user_id);
   if (!user) {
+    await SubscriptionPayment.findByIdAndUpdate(payment._id, { status: 'pending', completed_at: null });
     throw new Error('Utilisateur introuvable pour ce paiement');
   }
 
@@ -54,57 +63,79 @@ export async function fulfillSubscriptionPayment(
     premiumUntil,
     premiumSource: 'paid',
   });
-
-  await SubscriptionPayment.findByIdAndUpdate(payment._id, {
-    status: 'completed',
-    completed_at: new Date(),
-  });
+  // Le middleware protect garde l'utilisateur 8 s en mémoire : le nouveau palier s'applique tout de suite.
+  invalidateUserCache(String(user._id));
 
   return { activated: true, premiumUntil };
 }
 
-export async function processCinetPayTransaction(transactionId: string): Promise<{
+/**
+ * SasPay : session de checkout → transaction → GET /payments/{id}/verify/.
+ * L'accès n'est activé que si verify renvoie SUCCESS pour la transaction rattachée à NOTRE session.
+ */
+export async function processSasPayPayment(transactionId: string): Promise<{
   ok: boolean;
   payment?: ISubscriptionPayment;
   premiumUntil?: Date | null;
   pending?: boolean;
+  failed?: boolean;
 }> {
-  if (!isCinetPayConfigured()) {
-    return { ok: false };
-  }
+  if (!isSasPayConfigured()) return { ok: false };
 
-  const payment = await SubscriptionPayment.findOne({ transaction_id: transactionId });
-  if (!payment) {
-    return { ok: false };
-  }
+  const payment = await SubscriptionPayment.findOne({ transaction_id: transactionId, provider: 'saspay' });
+  if (!payment || !payment.saspay_session_id) return { ok: false, payment: payment ?? undefined };
 
   if (payment.status === 'completed') {
     const user = await User.findById(payment.user_id);
     return { ok: true, payment, premiumUntil: user?.premiumUntil ?? null };
   }
+  if (payment.status === 'failed') return { ok: false, payment, failed: true };
 
-  if (payment.status === 'failed') {
-    return { ok: false, payment };
-  }
-
-  const status = await getCinetPayPaymentStatus(transactionId);
+  const session = await getSasPayCheckoutStatus(payment.saspay_session_id);
+  const sessionStatus = String(session.status || '').toUpperCase();
+  const saspayTxId = session.transaction_id || payment.saspay_transaction_id || null;
 
   await SubscriptionPayment.findByIdAndUpdate(payment._id, {
-    cinetpay_status: status.status,
-    ...(status.transaction_id
-      ? { cinetpay_transaction_id: status.transaction_id }
-      : {}),
+    saspay_status: session.transaction_status || sessionStatus,
+    ...(saspayTxId ? { saspay_transaction_id: saspayTxId } : {}),
   });
 
-  if (isCinetPayPaymentSuccess(status)) {
+  if (!saspayTxId) {
+    if (sessionStatus === 'EXPIRED' || sessionStatus === 'CANCELLED') {
+      await SubscriptionPayment.findByIdAndUpdate(payment._id, { status: 'failed' });
+      return { ok: false, payment, failed: true };
+    }
+    return { ok: false, payment, pending: true };
+  }
+
+  const verified = await verifySasPayPayment(saspayTxId);
+  await SubscriptionPayment.findByIdAndUpdate(payment._id, {
+    saspay_status: verified.status,
+    saspay_charged: verified.debited_amount ?? null,
+    saspay_net_amount: verified.net_amount ?? null,
+    saspay_currency: verified.currency ?? null,
+  });
+
+  if (verified.status === 'SUCCESS') {
+    if (
+      verified.currency === payment.currency &&
+      verified.net_amount &&
+      Number(verified.net_amount) < payment.amount
+    ) {
+      console.warn(
+        `SasPay: net reçu ${verified.net_amount} < prix ${payment.amount} pour ${transactionId} — vérifiez Paramètres → Frais (ADD_ON).`
+      );
+    }
     const { premiumUntil } = await fulfillSubscriptionPayment(payment);
     return { ok: true, payment, premiumUntil };
   }
 
-  if (isCinetPayPaymentFailed(status)) {
-    await SubscriptionPayment.findByIdAndUpdate(payment._id, {
-      status: 'failed',
-    });
+  // Un FAILED reste rejouable sur la page hébergée (« Réessayer ») : on ne clôt pas tant que la session est ouverte.
+  if (verified.status === 'FAILED' || verified.status === 'CANCELLED') {
+    if (sessionStatus === 'EXPIRED' || sessionStatus === 'CANCELLED') {
+      await SubscriptionPayment.findByIdAndUpdate(payment._id, { status: 'failed' });
+      return { ok: false, payment, failed: true };
+    }
     return { ok: false, payment };
   }
 

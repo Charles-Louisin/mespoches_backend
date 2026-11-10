@@ -10,13 +10,13 @@ const router = Router();
 const categorySchema = Joi.object({
   name: Joi.string().required(),
   type: Joi.string().valid('income', 'expense').required(),
-  image_url: Joi.string().uri().allow(null, '').optional(),
+  image_url: Joi.string().uri({ scheme: ['https'] }).max(2048).allow(null, '').optional(),
 });
 
 const categoryUpdateSchema = Joi.object({
   name: Joi.string().optional(),
   type: Joi.string().valid('income', 'expense').optional(),
-  image_url: Joi.string().uri().allow(null, '').optional(),
+  image_url: Joi.string().uri({ scheme: ['https'] }).max(2048).allow(null, '').optional(),
 });
 
 router.get('/', protect, async (req: Request, res: Response) => {

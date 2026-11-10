@@ -1,4 +1,5 @@
 import { Types } from 'mongoose'
+import { categorySplitStages } from '../utils/categorySplit'
 import Transaction from '../models/Transaction'
 import Wallet from '../models/Wallet'
 import Budget from '../models/Budget'
@@ -84,19 +85,21 @@ export async function getCategoryStats(
   start: Date,
   end: Date
 ): Promise<CategoryStat[]> {
+  // Une transaction à plusieurs lignes de catégories différentes compte dans chacune (montant de la ligne).
   const rows = await Transaction.aggregate<{ category: string; total: number; count: number }>([
     {
       $match: {
         user_id: userId,
         type,
-        category_id: { $ne: null },
+        $or: [{ category_id: { $ne: null } }, { 'line_items.category_id': { $ne: null } }],
         date: { $gte: start, $lte: end },
       },
     },
+    ...categorySplitStages(),
     {
       $group: {
-        _id: '$category_id',
-        total: { $sum: '$amount' },
+        _id: '$__parts.cat',
+        total: { $sum: '$__parts.amount' },
         count: { $sum: 1 },
       },
     },
