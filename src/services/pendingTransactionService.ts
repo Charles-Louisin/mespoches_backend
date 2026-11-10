@@ -3,9 +3,19 @@ import PendingTransaction, { IPendingTransaction } from '../models/PendingTransa
 import Transaction from '../models/Transaction';
 import Wallet from '../models/Wallet';
 import {
+  extractTransactionId,
   parseMobileMoneySms,
   ParsedMobileMoney,
 } from '../utils/mobileMoneySmsParser';
+
+/**
+ * Seuls les messages d'un mouvement CONFIRMÉ portent un ID de transaction (Orange Money, MTN MoMo).
+ * Une demande de paiement, un code de validation ou une promo n'en ont pas : on les ignore
+ * avant toute analyse (et sans appeler l'IA).
+ */
+export function hasTransactionId(text: string): boolean {
+  return extractTransactionId(text.replace(/\s+/g, ' ')) !== '';
+}
 import { parseVoiceNote } from '../utils/voiceTransactionParser';
 import {
   applyHabitsAndAi,
@@ -66,6 +76,8 @@ export async function createFromSms(
   text: string,
   source: 'sms' | 'notification' = 'sms'
 ): Promise<CreatePendingResult | null> {
+  if (!hasTransactionId(text)) return null;
+
   const identity = await getUserSmsIdentity(userId);
   const outcome = await notificationAnalysisService.analyze(text, identity, {
     allowAi: true,
@@ -99,8 +111,10 @@ export async function createFromNotification(
     return null;
   }
 
-  const identity = await getUserSmsIdentity(userId);
   const raw = `${title}\n${body}`.trim();
+  if (!hasTransactionId(raw)) return null;
+
+  const identity = await getUserSmsIdentity(userId);
   const outcome = await notificationAnalysisService.analyze(raw, identity, {
     packageName,
     allowAi: true,

@@ -5,6 +5,7 @@ import Transaction from '../models/Transaction';
 import Category from '../models/Category';
 import PendingTransaction from '../models/PendingTransaction';
 import AnalyticsEvent from '../models/AnalyticsEvent';
+import SubscriptionPayment from '../models/SubscriptionPayment';
 import { protect, adminOnly } from '../middleware/auth';
 import { buildAdminInsights, buildTelemetryOverview } from '../services/adminInsights';
 import { listCohort } from '../services/adminCohorts';
@@ -405,6 +406,81 @@ router.get('/telemetry', protect, adminOnly, async (req: Request, res: Response)
       success: false,
       message: 'Erreur lors de la récupération de la télémétrie',
     });
+  }
+});
+
+/**
+ * Paiements d'abonnement (SasPay) : liste filtrable + totaux encaissés sur la période.
+ * ?status=completed|pending|failed  ?days=1..365 (défaut 30)  ?page=  ?limit=
+ */
+router.get('/payments', protect, adminOnly, async (req: Request, res: Response) => {
+  try {
+    const page = parseListPage(req.query, 50, 200);
+    const days = Math.min(365, Math.max(1, parseInt(String(req.query.days ?? ''), 10) || 30));
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const status = String(req.query.status || '');
+    const filter: Record<string, unknown> = { created_at: { $gte: since } };
+    if (status === 'completed' || status === 'pending' || status === 'failed') filter.status = status;
+
+    const [rows, total, byStatus, byTier] = await Promise.all([
+      SubscriptionPayment.find(filter)
+        .sort({ created_at: -1 })
+        .skip(page.skip)
+        .limit(page.limit)
+        .populate('user_id', 'email name')
+        .lean(),
+      SubscriptionPayment.countDocuments(filter),
+      SubscriptionPayment.aggregate<{ _id: string; count: number; amount: number }>([
+        { $match: { created_at: { $gte: since } } },
+        { $group: { _id: '$status', count: { $sum: 1 }, amount: { $sum: '$amount' } } },
+      ]),
+      SubscriptionPayment.aggregate<{ _id: string; count: number; amount: number }>([
+        { $match: { created_at: { $gte: since }, status: 'completed' } },
+        { $group: { _id: '$tier', count: { $sum: 1 }, amount: { $sum: '$amount' } } },
+      ]),
+    ]);
+
+    const stat = (s: string) => byStatus.find((b) => b._id === s) || { count: 0, amount: 0 };
+    const payments = rows.map((p) => {
+      const u = p.user_id as unknown as { _id?: unknown; email?: string; name?: string } | null;
+      return {
+        _id: String(p._id),
+        transaction_id: p.transaction_id,
+        user:
+          u && typeof u === 'object' && 'email' in u
+            ? { _id: String(u._id), email: u.email || '', name: u.name || '' }
+            : null,
+        tier: p.tier,
+        period: p.period,
+        amount: p.amount,
+        currency: p.currency,
+        status: p.status,
+        saspay_status: p.saspay_status ?? null,
+        saspay_charged: p.saspay_charged ?? null,
+        saspay_transaction_id: p.saspay_transaction_id ?? null,
+        created_at: p.created_at,
+        completed_at: p.completed_at ?? null,
+      };
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        days,
+        summary: {
+          revenue: stat('completed').amount,
+          completed: stat('completed').count,
+          pending: stat('pending').count,
+          failed: stat('failed').count,
+          byTier: byTier.map((t) => ({ tier: t._id, count: t.count, amount: t.amount })),
+        },
+        payments,
+        meta: listMeta(page, payments.length, total),
+      },
+    });
+  } catch (error) {
+    console.error('Erreur admin payments:', error);
+    return res.status(500).json({ success: false, message: 'Erreur lors de la récupération des paiements' });
   }
 });
 
