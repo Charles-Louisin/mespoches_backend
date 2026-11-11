@@ -91,6 +91,8 @@ export async function notifyUserOfPendingTransaction(params: {
   userId: string;
   description: string;
   amount?: number;
+  /** Ouvre directement cette proposition dans « À valider ». */
+  pendingId?: string;
 }): Promise<void> {
   const user = await User.findById(params.userId).select('expoPushToken').lean();
   if (!user?.expoPushToken) return;
@@ -103,6 +105,6 @@ export async function notifyUserOfPendingTransaction(params: {
     title: 'Transaction à valider',
     body: `${params.description || 'Transaction Mobile Money'}${amount}`,
     channelId: 'mes_poches_transactions',
-    data: { type: 'pending', screen: 'pending' },
+    data: { type: 'pending', screen: 'pending', ...(params.pendingId ? { pendingId: params.pendingId } : {}) },
   });
 }

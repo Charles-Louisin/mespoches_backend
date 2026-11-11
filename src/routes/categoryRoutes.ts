@@ -4,6 +4,7 @@ import { FilterQuery } from 'mongoose';
 import Category, { ICategory } from '../models/Category';
 import { protect, sendLimitError } from '../middleware/auth';
 import { assertCapacity, isPremiumUser } from '../utils/subscription';
+import { lockedIdsFor } from '../utils/planLocks';
 
 const router = Router();
 
@@ -28,7 +29,12 @@ router.get('/', protect, async (req: Request, res: Response) => {
       query.type = type;
     }
 
-    const categories = await Category.find(query).select('name type image_url created_at').sort({ name: 1 }).limit(200).lean();
+    const [rows, locked] = await Promise.all([
+      Category.find(query).select('name type image_url created_at').sort({ name: 1 }).limit(1000).lean(),
+      lockedIdsFor(req.user!, 'categories'),
+    ]);
+    // Au-delà du palier : visible mais inutilisable jusqu'au passage au palier supérieur.
+    const categories = rows.map((c) => ({ ...c, locked: locked.has(String(c._id)) }));
 
     return res.json({
       success: true,

@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import Joi from 'joi';
 import { Types } from 'mongoose';
 import Wallet from '../models/Wallet';
+import { lockedIdsFor } from '../utils/planLocks';
 import Transaction from '../models/Transaction';
 import PlannedExpense from '../models/PlannedExpense';
 import { protect, sendLimitError } from '../middleware/auth';
@@ -42,8 +43,9 @@ router.get('/', protect, async (req: Request, res: Response) => {
     })
       .select(WALLET_LIST_SELECT)
       .sort({ created_at: -1 })
-      .limit(100)
+      .limit(1000)
       .lean();
+    const lockedWallets = await lockedIdsFor(req.user!, 'wallets');
 
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -84,6 +86,8 @@ router.get('/', protect, async (req: Request, res: Response) => {
         ...w,
         month_income: stats.income,
         month_expense: stats.expense,
+        // Au-delà du palier : visible mais inutilisable jusqu'au passage au palier supérieur.
+        locked: lockedWallets.has(String(w._id)),
       };
     });
 

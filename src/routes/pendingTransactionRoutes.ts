@@ -3,6 +3,7 @@ import Joi from 'joi';
 import PendingTransaction from '../models/PendingTransaction';
 import { protect, sendLimitError } from '../middleware/auth';
 import { assertAiQuota, recordAiUsage } from '../utils/subscription';
+import { rejectIfLocked } from '../utils/planLocks';
 import {
   createFromSms,
   createFromNotification,
@@ -230,6 +231,20 @@ router.post('/:id/validate', async (req: Request, res: Response) => {
       return;
     }
 
+    const walletId = value.wallet_id !== undefined ? value.wallet_id : item.wallet_id;
+    const categoryId = value.category_id !== undefined ? value.category_id : item.category_id;
+    const lineCategories = (value.ai_items || item.ai_items || []).map(
+      (l: { category_id?: unknown }) => l.category_id
+    );
+    if (
+      await rejectIfLocked(res, req.user!, {
+        wallets: [walletId],
+        categories: [categoryId, ...lineCategories],
+      })
+    ) {
+      return;
+    }
+
     const result = await validatePendingTransaction(item, req.user!._id, value);
     res.json({
       success: true,
@@ -299,6 +314,7 @@ router.post('/parse-sms', parseIngestLimiter, async (req: Request, res: Response
       userId: String(req.user!._id),
       description: created.item?.description || 'SMS Mobile Money',
       amount: created.item?.amount,
+      pendingId: created.item?._id ? String(created.item._id) : undefined,
     });
     res.status(201).json({ success: true, data: created.item, duplicate: false });
   } catch {
@@ -349,6 +365,7 @@ router.post('/parse-notification', parseIngestLimiter, async (req: Request, res:
       userId: String(req.user!._id),
       description: created.item?.description || 'Notification Mobile Money',
       amount: created.item?.amount,
+      pendingId: created.item?._id ? String(created.item._id) : undefined,
     });
     res.status(201).json({ success: true, data: created.item, duplicate: false });
   } catch {

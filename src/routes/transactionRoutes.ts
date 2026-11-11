@@ -10,6 +10,7 @@ import { isPremiumUser, getFreeHistoryStartDate } from '../utils/subscription';
 import { allocateToSavingsGoal } from '../utils/savingsAllocation';
 import { isFutureUtcDay } from '../utils/plannedExpenseDates';
 import { resolveOwnedCategoryId } from '../utils/ownership';
+import { rejectIfLocked } from '../utils/planLocks';
 import { debitWallet, creditWallet } from '../services/walletTransaction';
 import { parseListPage, listMeta } from '../utils/pagination';
 import {
@@ -377,6 +378,28 @@ router.get('/', protect, async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * Historique hors forfait (plan gratuit : 3 derniers mois). Rien n'est supprimé : l'app affiche
+ * combien d'opérations plus anciennes existent, grisées, à débloquer avec un palier payant.
+ */
+router.get('/history-lock', protect, async (req: Request, res: Response) => {
+  try {
+    if (isPremiumUser(req.user!)) {
+      return res.json({ success: true, data: { limited: false, cutoff: null, hiddenCount: 0 } });
+    }
+    const cutoff = getFreeHistoryStartDate();
+    const hiddenCount = await Transaction.countDocuments({
+      user_id: req.user!._id,
+      date: { $lt: cutoff },
+      $or: [{ type: { $ne: 'transfer' } }, { type: 'transfer', is_transfer_mirror: { $ne: true } }],
+    });
+    return res.json({ success: true, data: { limited: true, cutoff, hiddenCount } });
+  } catch (error) {
+    console.error('Erreur history-lock:', error);
+    return res.status(500).json({ success: false, message: 'Erreur serveur' });
+  }
+});
+
 router.get('/:id', protect, async (req: Request, res: Response) => {
   try {
     const transaction = await Transaction.findOne({
@@ -490,6 +513,14 @@ router.post('/income', protect, async (req: Request, res: Response) => {
         message: error.details[0].message,
       });
     }
+    if (
+      await rejectIfLocked(res, req.user!, {
+        wallets: [value.wallet_id],
+        categories: [value.category_id, ...(value.line_items?.map((l: { category_id?: unknown }) => l.category_id) || [])],
+      })
+    ) {
+      return;
+    }
 
     if (value.savings_goal_id) {
       if (!isPremiumUser(req.user!)) {
@@ -552,6 +583,14 @@ router.post('/expense', protect, async (req: Request, res: Response) => {
         message: error.details[0].message,
       });
     }
+    if (
+      await rejectIfLocked(res, req.user!, {
+        wallets: [value.wallet_id],
+        categories: [value.category_id, ...(value.line_items?.map((l: { category_id?: unknown }) => l.category_id) || [])],
+      })
+    ) {
+      return;
+    }
 
     if (value.date && isFutureUtcDay(value.date)) {
       return res.status(400).json({
@@ -588,6 +627,9 @@ router.post('/transfer', protect, async (req: Request, res: Response) => {
         success: false,
         message: error.details[0].message,
       });
+    }
+    if (await rejectIfLocked(res, req.user!, { wallets: [value.wallet_id, value.destination_wallet_id] })) {
+      return;
     }
 
     const toSavings = Boolean(value.savings_goal_id);
@@ -774,6 +816,21 @@ router.put('/:id', protect, async (req: Request, res: Response) => {
     const newAmount = value.amount ?? oldAmount;
     const oldWalletId = String(transaction.wallet_id);
     const newWalletId = value.wallet_id ?? oldWalletId;
+
+    // On peut toujours corriger une opération existante, mais pas la déplacer vers une poche
+    // ou une catégorie hors forfait.
+    const movedCategory =
+      value.category_id !== undefined && String(value.category_id || '') !== String(transaction.category_id || '')
+        ? [value.category_id]
+        : [];
+    if (
+      await rejectIfLocked(res, req.user!, {
+        wallets: newWalletId !== oldWalletId ? [newWalletId] : [],
+        categories: [...movedCategory, ...(value.line_items?.map((l: { category_id?: unknown }) => l.category_id) || [])],
+      })
+    ) {
+      return;
+    }
 
     if (value.description !== undefined) {
       transaction.description = value.description || '';
