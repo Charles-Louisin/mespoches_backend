@@ -4,6 +4,7 @@ import SubscriptionPayment, {
   type ISubscriptionPayment,
   type BillingPeriod,
 } from '../models/SubscriptionPayment';
+import { announcePaymentOutcomeSoon } from './paymentAlerts';
 import { getSasPayCheckoutStatus, isSasPayConfigured, verifySasPayPayment } from './saspay';
 
 export function computePremiumUntil(
@@ -54,6 +55,8 @@ export async function fulfillSubscriptionPayment(
   }
 
   const premiumUntil = computePremiumUntil(user.premiumUntil, payment.period);
+  // Début de la période payée : aujourd'hui, ou la fin de l'abonnement en cours s'il court encore.
+  const periodStart = user.premiumUntil && user.premiumUntil > new Date() ? user.premiumUntil : new Date();
 
   const tier = payment.tier === 'pro_plus' || payment.tier === 'business' ? payment.tier : 'pro';
   await User.findByIdAndUpdate(user._id, {
@@ -65,6 +68,7 @@ export async function fulfillSubscriptionPayment(
   });
   // Le middleware protect garde l'utilisateur 8 s en mémoire : le nouveau palier s'applique tout de suite.
   invalidateUserCache(String(user._id));
+  announcePaymentOutcomeSoon(claimed, 'success', { start: periodStart, end: premiumUntil });
 
   return { activated: true, premiumUntil };
 }
@@ -132,6 +136,8 @@ export async function processSasPayPayment(transactionId: string): Promise<{
 
   // Un FAILED reste rejouable sur la page hébergée (« Réessayer ») : on ne clôt pas tant que la session est ouverte.
   if (verified.status === 'FAILED' || verified.status === 'CANCELLED') {
+    // Une alerte par transaction SasPay échouée (le client peut réessayer sur la même session).
+    announcePaymentOutcomeSoon(payment, 'failed');
     if (sessionStatus === 'EXPIRED' || sessionStatus === 'CANCELLED') {
       await SubscriptionPayment.findByIdAndUpdate(payment._id, { status: 'failed' });
       return { ok: false, payment, failed: true };

@@ -20,6 +20,8 @@ export interface ISubscriptionPayment extends Document {
   saspay_net_amount?: string | null;
   saspay_currency?: string | null;
   completed_at?: Date | null;
+  /** Alertes admin déjà envoyées (succès, ou échec par transaction SasPay) : jamais en double. */
+  admin_alerts?: string[];
   created_at: Date;
 }
 
@@ -63,6 +65,7 @@ const subscriptionPaymentSchema = new Schema<ISubscriptionPayment>(
     saspay_net_amount: { type: String, default: null },
     saspay_currency: { type: String, default: null },
     completed_at: { type: Date, default: null },
+    admin_alerts: { type: [String], default: [] },
     created_at: { type: Date, default: Date.now },
   },
   { timestamps: false }

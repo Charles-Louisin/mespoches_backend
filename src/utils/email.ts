@@ -224,3 +224,109 @@ export async function sendTwoFactorEmail(to: string, code: string, purpose: TwoF
     throw new Error("Impossible d'envoyer le code de connexion");
   }
 }
+
+export interface AdminPaymentEmail {
+  success: boolean;
+  message: string;
+  tier: string;
+  periodLabel: string;
+  amount: string;
+  charged: string | null;
+  net: string | null;
+  reference: string;
+  saspayTransactionId: string | null;
+  saspayStatus: string | null;
+  createdAt: Date;
+  completedAt: Date | null;
+  payer: {
+    id: string;
+    name: string;
+    email: string;
+    memberSince: Date | null;
+    activeTier: string;
+    source: string | null;
+    premiumUntil: Date | null;
+  } | null;
+  periodStart: Date | null;
+  periodEnd: Date | null;
+}
+
+const fmtDate = (d: Date | null | undefined): string =>
+  d
+    ? new Date(d).toLocaleString('fr-FR', {
+        day: 'numeric',
+        month: 'long',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        timeZone: 'Africa/Douala',
+      })
+    : '—';
+
+/** Résultat d'un paiement d'abonnement, envoyé aux admins. */
+export async function sendAdminPaymentEmail(to: string, p: AdminPaymentEmail): Promise<void> {
+  if (!process.env.RESEND_API_KEY) {
+    console.warn('RESEND_API_KEY manquant — alerte paiement admin ignorée');
+    return;
+  }
+  const row = (label: string, value: string | null | undefined) =>
+    `<tr><td style="padding:6px 12px 6px 0;color:#6b7280;font-size:14px;vertical-align:top;white-space:nowrap;">${escapeHtml(label)}</td><td style="padding:6px 0;font-size:14px;color:#1b1630;">${escapeHtml(value || '—')}</td></tr>`;
+  const section = (title: string, rows: string) =>
+    `<p style="margin:24px 0 6px;font-size:13px;font-weight:700;color:#1b1630;">${escapeHtml(title)}</p><table style="border-collapse:collapse;width:100%;">${rows}</table>`;
+
+  const tone = p.success
+    ? { bg: '#ECFDF5', fg: '#047857', title: 'Paiement réussi' }
+    : { bg: '#FEF2F2', fg: '#B91C1C', title: 'Paiement échoué' };
+
+  const payer = p.payer;
+  const html = emailLayout(`
+      <div style="background:${tone.bg};border-radius:14px;padding:18px 20px;margin:20px 0 4px;">
+        <p style="margin:0;font-size:18px;font-weight:700;color:${tone.fg};">${tone.title}</p>
+        <p style="margin:6px 0 0;font-size:15px;color:#1b1630;">${escapeHtml(`${p.tier} ${p.periodLabel} · ${p.amount}`)}</p>
+        <p style="margin:6px 0 0;font-size:14px;color:#374151;">${escapeHtml(p.message)}</p>
+      </div>
+      ${section(
+        'Payeur',
+        payer
+          ? row('Nom', payer.name) +
+              row('E-mail', payer.email) +
+              row('Identifiant', payer.id) +
+              row('Inscrit le', fmtDate(payer.memberSince))
+          : row('Compte', 'introuvable (supprimé ?)')
+      )}
+      ${section(
+        'Forfait',
+        row('Forfait payé', `${p.tier} (${p.periodLabel})`) +
+          (p.success ? row('Début', fmtDate(p.periodStart)) + row('Fin', fmtDate(p.periodEnd)) : '') +
+          (payer
+            ? row('Forfait actif du compte', payer.activeTier) +
+              row('Actif jusqu’au', fmtDate(payer.premiumUntil)) +
+              row('Origine', payer.source === 'paid' ? 'payé' : payer.source === 'trial' ? 'essai' : payer.source === 'lifetime' ? 'à vie' : payer.source)
+            : '')
+      )}
+      ${section(
+        'Paiement',
+        row('Montant', p.amount) +
+          row('Débité au client', p.charged) +
+          row('Net reçu', p.net) +
+          row('Statut SasPay', p.saspayStatus) +
+          row('Référence', p.reference) +
+          row('Transaction SasPay', p.saspayTransactionId) +
+          row('Créé le', fmtDate(p.createdAt)) +
+          (p.success ? row('Confirmé le', fmtDate(p.completedAt)) : '')
+      )}
+      <p style="margin-top:24px;"><a href="${SITE_URL}/admin/payments" style="color:#2563EB;text-decoration:none;font-weight:600;">Voir les paiements dans la console</a></p>
+  `);
+
+  const { error } = await resend.emails.send({
+    from: FROM_EMAIL,
+    to,
+    ...(REPLY_TO ? { replyTo: REPLY_TO } : {}),
+    subject: `${tone.title} · ${p.tier} ${p.periodLabel} · ${p.amount} — MES POCHES`,
+    html,
+  });
+  if (error) {
+    console.error('Erreur Resend alerte paiement:', error);
+    throw new Error("Impossible d'envoyer l'alerte de paiement");
+  }
+}
