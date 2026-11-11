@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { withLineCategories } from '../utils/lineCategories';
 import Joi from 'joi';
 import mongoose, { FilterQuery, Types } from 'mongoose';
+import { mergeLineItems } from '../utils/lineItemsMerge';
 import Transaction, { ITransaction, TransactionType } from '../models/Transaction';
 import Wallet from '../models/Wallet';
 import SavingsGoal from '../models/SavingsGoal';
@@ -869,19 +870,13 @@ router.put('/:id', protect, async (req: Request, res: Response) => {
         transaction.type === 'income' ? 'income' : 'expense',
         incoming
       );
-      transaction.line_items = incoming.map((item, idx) => {
-        const prev = existing[idx];
-        return {
-          description: String(item.description || prev?.description || '').trim(),
-          amount: prev?.amount ?? item.amount ?? 0,
-          quantity: prev?.quantity ?? item.quantity ?? 1,
-          unit_amount: prev?.unit_amount ?? item.unit_amount,
-          type: prev?.type ?? item.type,
-          // Catégorie modifiable ligne par ligne ; non fournie → on garde l'ancienne.
-          category_id:
-            item.category_id !== undefined ? withCats[idx].category_id : (prev?.category_id ?? null),
-        };
-      });
+      // La liste reçue fait foi : une ligne supprimée disparaît, un montant modifié est gardé.
+      transaction.line_items = mergeLineItems(
+        existing,
+        incoming,
+        withCats,
+        transaction.type === 'income' ? 'income' : 'expense'
+      ) as typeof transaction.line_items;
       transaction.markModified('line_items');
     }
 

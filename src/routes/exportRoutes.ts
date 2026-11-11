@@ -11,6 +11,8 @@ import {
   buildTransactionsPdf,
   buildTransactionsXlsx,
   buildSingleTransactionXlsx,
+  exportFileBase,
+  type ExportContext,
   PopulatedTransactionLike,
 } from '../utils/transactionExport';
 
@@ -38,14 +40,66 @@ function sendFile(
   res.send(buffer);
 }
 
+const YMD = /^d{4}-d{2}-d{2}$/;
+
+/** Fuseau de l'utilisateur (envoyé par l'app) ; Afrique centrale par défaut. */
+function timeZoneOf(raw: unknown): string {
+  const tz = String(raw || '').trim();
+  if (tz && tz.length <= 64) {
+    try {
+      new Intl.DateTimeFormat('fr-FR', { timeZone: tz });
+      return tz;
+    } catch {
+      /* fuseau inconnu */
+    }
+  }
+  return 'Africa/Douala';
+}
+
+function exportContext(req: Request, period?: { from: string | null; to: string | null }): ExportContext {
+  const user = req.user!;
+  return {
+    holderName: user.name || '',
+    holderEmail: user.email,
+    currency: user.currency || 'XAF',
+    timeZone: timeZoneOf(req.query.tz),
+    from: period?.from ?? null,
+    to: period?.to ?? null,
+    generatedAt: new Date(),
+  };
+}
+
+/** Période affichée dans le titre : dates locales choisies dans l'app (fin incluse). */
+function requestedPeriod(req: Request, since: Date | null): { from: string | null; to: string | null } {
+  const from = String(req.query.from || '');
+  const to = String(req.query.to || '');
+  if (YMD.test(from) && YMD.test(to) && from <= to) return { from, to };
+  if (since) {
+    const tz = timeZoneOf(req.query.tz);
+    const fmt = (d: Date) =>
+      new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+    return { from: fmt(since), to: fmt(new Date()) };
+  }
+  return { from: null, to: null };
+}
+
+function withDetails<T>(query: T): T {
+  const q = query as unknown as {
+    populate: (path: string | Record<string, unknown>, select?: string) => unknown;
+  };
+  q.populate('wallet_id', 'name');
+  q.populate('destination_wallet_id', 'name');
+  q.populate('category_id', 'name');
+  q.populate('savings_goal_id', 'title');
+  q.populate({ path: 'line_items.category_id', select: 'name' });
+  return query;
+}
+
 async function getUserTransaction(
   userId: import('mongoose').Types.ObjectId,
   id: string
 ) {
-  return Transaction.findOne({ _id: id, user_id: userId })
-    .populate('wallet_id', 'name')
-    .populate('destination_wallet_id', 'name')
-    .populate('category_id', 'name');
+  return withDetails(Transaction.findOne({ _id: id, user_id: userId }));
 }
 
 function exportSince(user: IUser, raw: unknown): Date | null {
@@ -101,41 +155,27 @@ router.get('/transactions', protect, premiumOnly, exportLimiter, async (req: Req
         ? { date: { $gte: since } }
         : null;
 
-    const transactions = await Transaction.find({
-      user_id: req.user!._id,
-      $and: [listQuery, ...(dateClause ? [dateClause] : [])],
-    })
-      .populate('wallet_id', 'name')
-      .populate('destination_wallet_id', 'name')
-      .populate('category_id', 'name')
-      .sort({ date: -1 })
-      .limit(EXPORT_MAX_ROWS);
+    // Ordre chronologique (du plus ancien au plus récent) : lecture naturelle d'un relevé.
+    const transactions = await withDetails(
+      Transaction.find({
+        user_id: req.user!._id,
+        $and: [listQuery, ...(dateClause ? [dateClause] : [])],
+      })
+        .sort({ date: 1, created_at: 1 })
+        .limit(EXPORT_MAX_ROWS)
+    ).lean();
 
     const rows = transactions as unknown as PopulatedTransactionLike[];
-    const stamp = Date.now();
+    const ctx = exportContext(req, requestedPeriod(req, since));
+    const base = exportFileBase(ctx, rows);
 
     if (format === 'pdf') {
-      const pdf = await buildTransactionsPdf(rows);
-      return sendFile(
-        res,
-        pdf,
-        `mes-poches-transactions-${stamp}.pdf`,
-        'application/pdf'
-      );
+      return sendFile(res, await buildTransactionsPdf(rows, ctx), `${base}.pdf`, 'application/pdf');
     }
-
     if (format === 'xlsx') {
-      const xlsx = buildTransactionsXlsx(rows);
-      return sendFile(
-        res,
-        xlsx,
-        `mes-poches-transactions-${stamp}.xlsx`,
-        XLSX_MIME
-      );
+      return sendFile(res, await buildTransactionsXlsx(rows, ctx), `${base}.xlsx`, XLSX_MIME);
     }
-
-    const csv = buildTransactionsCsv(rows);
-    return sendFile(res, csv, `mes-poches-transactions-${stamp}.csv`, 'text/csv; charset=utf-8');
+    return sendFile(res, buildTransactionsCsv(rows, ctx), `${base}.csv`, 'text/csv; charset=utf-8');
   } catch (error) {
     console.error('Erreur export:', error);
     return res.status(500).json({
@@ -161,41 +201,23 @@ router.get('/transactions/:id', protect, premiumOnly, exportLimiter, async (req:
       });
     }
 
-    const row = transaction as unknown as PopulatedTransactionLike;
-    const stamp = Date.now();
-    const shortId = String(transaction._id).slice(-8);
-
-    let transferFrom: string | undefined;
-    let transferTo: string | undefined;
-    if (transaction.type === 'transfer') {
-      const w = transaction.wallet_id as { name?: string } | null;
-      const d = transaction.destination_wallet_id as { name?: string } | null;
-      transferFrom = w?.name;
-      transferTo = d?.name;
-    }
+    const row = transaction.toObject() as unknown as PopulatedTransactionLike;
+    const ctx = exportContext(req);
+    const day = new Intl.DateTimeFormat('en-CA', {
+      timeZone: ctx.timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date(transaction.date));
+    const base = `mes-poches-operation-${day}-${String(transaction._id).slice(-6)}`;
 
     if (format === 'pdf') {
-      const pdf = await buildTransactionPdf(row, { transferFrom, transferTo });
-      return sendFile(
-        res,
-        pdf,
-        `transaction-${shortId}-${stamp}.pdf`,
-        'application/pdf'
-      );
+      return sendFile(res, await buildTransactionPdf(row, ctx), `${base}.pdf`, 'application/pdf');
     }
-
     if (format === 'xlsx') {
-      const xlsx = buildSingleTransactionXlsx(row);
-      return sendFile(
-        res,
-        xlsx,
-        `transaction-${shortId}-${stamp}.xlsx`,
-        XLSX_MIME
-      );
+      return sendFile(res, await buildSingleTransactionXlsx(row, ctx), `${base}.xlsx`, XLSX_MIME);
     }
-
-    const csv = buildSingleTransactionCsv(row);
-    return sendFile(res, csv, `transaction-${shortId}-${stamp}.csv`, 'text/csv; charset=utf-8');
+    return sendFile(res, buildSingleTransactionCsv(row, ctx), `${base}.csv`, 'text/csv; charset=utf-8');
   } catch (error) {
     console.error('Erreur export transaction:', error);
     return res.status(500).json({

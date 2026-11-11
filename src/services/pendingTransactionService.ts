@@ -33,6 +33,7 @@ import { LOW_CONFIDENCE_THRESHOLD } from '../config/aiModels';
 import { maybeSuggestRecurrence } from './recurrenceSuggestionService';
 import { resolveOwnedCategoryId } from '../utils/ownership';
 import { withLineCategories } from '../utils/lineCategories';
+import { mergeLineItems } from '../utils/lineItemsMerge';
 import { catalogForPrompt, getCategoryCatalog } from '../utils/categoryCatalog';
 
 async function buildFromParsed(
@@ -227,23 +228,9 @@ export async function validatePendingTransaction(
   }
 
   if (updates?.ai_items && updates.ai_items.length > 0) {
-    // Montants inchangés : on remplace les libellés et les catégories de ligne par index.
-    const base = pending.ai_items?.length ? pending.ai_items : updates.ai_items;
+    // La liste envoyée fait foi : les lignes retirées par l'utilisateur ne reviennent pas.
     const lineCats = await withLineCategories(userId, type, updates.ai_items);
-    pending.ai_items = base.map((item, idx) => ({
-      category_id:
-        updates.ai_items![idx]?.category_id !== undefined
-          ? lineCats[idx]?.category_id ?? null
-          : ((item as { category_id?: Types.ObjectId | null }).category_id ?? null),
-      description:
-        updates.ai_items![idx]?.description?.trim() ||
-        item.description ||
-        '',
-      amount: item.amount,
-      quantity: item.quantity && item.quantity > 1 ? item.quantity : 1,
-      unit_amount: item.unit_amount,
-      type: item.type ?? type,
-    }));
+    pending.ai_items = mergeLineItems(pending.ai_items || [], updates.ai_items, lineCats, type) as typeof pending.ai_items;
   }
 
   // Revérifie chaque catégorie de ligne contre le type FINAL (ex. dépense passée en revenu).

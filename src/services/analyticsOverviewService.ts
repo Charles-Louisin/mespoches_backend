@@ -30,6 +30,7 @@ export type TxHit = {
   amount: number
   date: string
   category: string | null
+  wallet: string | null
 }
 
 const WEEKDAYS = ['Dim', 'Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam']
@@ -131,6 +132,7 @@ function toHitFromLean(t: {
   amount: number
   date: Date
   category_id?: unknown
+  wallet_id?: unknown
 }): TxHit {
   return {
     id: String(t._id),
@@ -138,6 +140,10 @@ function toHitFromLean(t: {
     amount: t.amount,
     date: new Date(t.date).toISOString(),
     category: catName(t.category_id),
+    wallet:
+      t.wallet_id && typeof t.wallet_id === 'object' && 'name' in t.wallet_id
+        ? String((t.wallet_id as { name?: string }).name || '') || null
+        : null,
   }
 }
 
@@ -152,8 +158,9 @@ async function topHits(
     type,
     date: { $gte: start, $lte: end },
   })
-    .select('description amount date category_id')
+    .select('description amount date category_id wallet_id')
     .populate('category_id', 'name')
+    .populate('wallet_id', 'name')
     .sort({ amount: -1 })
     .limit(5)
     .lean()

@@ -16,6 +16,7 @@ import SmsHabit from '../models/SmsHabit';
 import NotificationPattern from '../models/NotificationPattern';
 import SubscriptionPayment from '../models/SubscriptionPayment';
 import FeedbackMessage from '../models/FeedbackMessage';
+import AnalyticsEvent from '../models/AnalyticsEvent';
 import { invalidateUserCache, protect } from '../middleware/auth';
 import { sendExistingAccountEmail } from '../utils/email';
 import { toPublicUser } from '../utils/userPayload';
@@ -868,6 +869,8 @@ router.delete('/me', protect, async (req: Request, res: Response) => {
       NotificationPattern.deleteMany({ user_id: userId }),
       SubscriptionPayment.deleteMany({ user_id: userId }),
       FeedbackMessage.deleteMany({ user_id: userId }),
+      // Seules les empreintes d'AccountTrace survivent (anti-abus de l'essai gratuit).
+      AnalyticsEvent.deleteMany({ user_id: userId }),
       User.deleteOne({ _id: userId }),
     ]);
 

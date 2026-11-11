@@ -171,19 +171,12 @@ router.put('/:id', async (req: Request, res: Response) => {
     if (value.category_id === '' || value.category_id === null) {
       item.category_id = null;
     }
-    // Les montants des articles restent ceux extraits : libellés et catégories de ligne modifiables.
-    if (incomingItems && incomingItems.length > 0 && item.ai_items?.length) {
+    // La liste reçue fait foi : lignes supprimées, libellés, montants et catégories modifiés.
+    if (incomingItems && incomingItems.length > 0) {
       const { withLineCategories } = await import('../utils/lineCategories');
+      const { mergeLineItems } = await import('../utils/lineItemsMerge');
       const cats = await withLineCategories(req.user!._id, item.type, incomingItems);
-      item.ai_items = item.ai_items.map((line, idx) => ({
-        description: incomingItems[idx]?.description?.trim() || line.description || '',
-        amount: line.amount,
-        quantity: line.quantity && line.quantity > 1 ? line.quantity : 1,
-        unit_amount: line.unit_amount,
-        type: line.type,
-        category_id:
-          incomingItems[idx]?.category_id !== undefined ? cats[idx]?.category_id ?? null : line.category_id ?? null,
-      }));
+      item.ai_items = mergeLineItems(item.ai_items || [], incomingItems, cats, item.type) as typeof item.ai_items;
       item.markModified('ai_items');
     }
     await item.save();
