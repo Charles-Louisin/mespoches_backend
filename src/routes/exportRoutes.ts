@@ -1,6 +1,9 @@
 import { Router, Request, Response } from 'express';
 import type { IUser } from '../models/User';
+import { Types } from 'mongoose';
 import Transaction from '../models/Transaction';
+import Category from '../models/Category';
+import { matchCategoryOrLines } from '../utils/categorySplit';
 import { protect, premiumOnly, sendLimitError } from '../middleware/auth';
 import { canExportRange, exportFormatDenied } from '../utils/subscription';
 import { exportLimiter } from '../utils/security';
@@ -40,7 +43,7 @@ function sendFile(
   res.send(buffer);
 }
 
-const YMD = /^d{4}-d{2}-d{2}$/;
+const YMD = /^\d{4}-\d{2}-\d{2}$/;
 
 /** Fuseau de l'utilisateur (envoyé par l'app) ; Afrique centrale par défaut. */
 function timeZoneOf(raw: unknown): string {
@@ -148,6 +151,26 @@ router.get('/transactions', protect, premiumOnly, exportLimiter, async (req: Req
         message: 'Choisissez au moins une période valide.',
       });
     }
+    // Export par catégorie (une ou plusieurs) : réservé au forfait Business.
+    const categoryIds = String(req.query.categories || '')
+      .split(',')
+      .map((id) => id.trim())
+      .filter((id) => Types.ObjectId.isValid(id))
+      .slice(0, 200);
+    if (categoryIds.length && !canExportRange(req.user!)) {
+      return sendLimitError(res, "L'export par catégorie est réservé au forfait Business.", {
+        code: 'QUOTA_REACHED',
+        data: { resource: 'categories', used: 0, limit: 0, nextTier: 'business', nextLabel: 'Business' },
+      });
+    }
+    const owned = categoryIds.length
+      ? await Category.find({ _id: { $in: categoryIds }, user_id: req.user!._id }).select('_id name').lean()
+      : [];
+    if (categoryIds.length && !owned.length) {
+      return res.status(400).json({ success: false, message: 'Catégorie introuvable.' });
+    }
+    const categoryClause = owned.length ? matchCategoryOrLines(owned.map((c) => c._id)) : null;
+
     const since = ranges ? null : exportSince(req.user!, req.query.days);
     const dateClause = ranges
       ? { $or: ranges }
@@ -159,7 +182,7 @@ router.get('/transactions', protect, premiumOnly, exportLimiter, async (req: Req
     const transactions = await withDetails(
       Transaction.find({
         user_id: req.user!._id,
-        $and: [listQuery, ...(dateClause ? [dateClause] : [])],
+        $and: [listQuery, ...(dateClause ? [dateClause] : []), ...(categoryClause ? [categoryClause] : [])],
       })
         .sort({ date: 1, created_at: 1 })
         .limit(EXPORT_MAX_ROWS)

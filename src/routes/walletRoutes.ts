@@ -37,21 +37,22 @@ const walletUpdateSchema = Joi.object({
 
 router.get('/', protect, async (req: Request, res: Response) => {
   try {
-    const wallets = await Wallet.find({
-      user_id: req.user!._id,
-      is_deleted: { $ne: true },
-    })
-      .select(WALLET_LIST_SELECT)
-      .sort({ created_at: -1 })
-      .limit(1000)
-      .lean();
-    const lockedWallets = await lockedIdsFor(req.user!, 'wallets');
-
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
     const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
 
-    const monthAgg = await Transaction.aggregate<{
+    // Trois lectures indépendantes : en parallèle (un aller-retour base au lieu de trois).
+    const [wallets, lockedWallets, monthAgg] = await Promise.all([
+      Wallet.find({
+        user_id: req.user!._id,
+        is_deleted: { $ne: true },
+      })
+        .select(WALLET_LIST_SELECT)
+        .sort({ created_at: -1 })
+        .limit(1000)
+        .lean(),
+      lockedIdsFor(req.user!, 'wallets'),
+      Transaction.aggregate<{
       _id: { wallet_id: Types.ObjectId; type: string };
       total: number;
     }>([
@@ -69,6 +70,7 @@ router.get('/', protect, async (req: Request, res: Response) => {
           total: { $sum: '$amount' },
         },
       },
+    ]),
     ]);
 
     const monthByWallet = new Map<string, { income: number; expense: number }>();

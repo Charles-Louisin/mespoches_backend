@@ -15,6 +15,8 @@ export interface IPlannedExpense extends Document {
   cancelled_reason: PlannedExpenseCancelledReason | null;
   executed_transaction_id: Types.ObjectId | null;
   reminder_sent_at: Date | null;
+  /** Alerte « la poche couvre maintenant cette dépense » déjà envoyée (remise à null si le solde redescend). */
+  funded_notified_at: Date | null;
   execution_claimed_at: Date | null;
   created_at: Date;
 }
@@ -70,6 +72,10 @@ const plannedExpenseSchema = new Schema<IPlannedExpense>(
       default: null,
     },
     reminder_sent_at: {
+      type: Date,
+      default: null,
+    },
+    funded_notified_at: {
       type: Date,
       default: null,
     },

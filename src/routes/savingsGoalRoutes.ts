@@ -3,6 +3,7 @@ import Joi from 'joi';
 import SavingsGoal from '../models/SavingsGoal';
 import { protect, premiumOnly } from '../middleware/auth';
 import { getTotalSavings } from '../utils/savingsAllocation';
+import { enrichGoals, ensureGoalTips } from '../services/goalInsights';
 
 const router = Router();
 
@@ -35,32 +36,46 @@ router.get('/total', async (req: Request, res: Response) => {
 
 router.get('/', async (req: Request, res: Response) => {
   try {
-    const goals = await SavingsGoal.find({ user_id: req.user!._id })
-      .select('title target_amount saved_amount deadline created_at')
-      .sort({ created_at: -1 })
+    // ?status=achieved → historique des objectifs atteints ; par défaut, les objectifs en cours.
+    const achieved = req.query.status === 'achieved';
+    const goals = await SavingsGoal.find({
+      user_id: req.user!._id,
+      achieved_at: achieved ? { $ne: null } : null,
+    })
+      .select('title target_amount saved_amount deadline achieved_at ai_tips created_at')
+      .sort(achieved ? { achieved_at: -1 } : { created_at: -1 })
       .limit(100)
       .lean();
 
-    const enriched = goals.map((g) => {
-      const current = g.saved_amount ?? 0;
-      return {
-        ...g,
-        _id: String(g._id),
-        current_amount: current,
-        progress_percent:
-          g.target_amount > 0
-            ? Math.min(100, (current / g.target_amount) * 100)
-            : 0,
-      };
-    });
-
-    return res.json({ success: true, data: enriched });
+    const data = await enrichGoals(req.user!._id, goals, req.user!.currency || 'XAF');
+    // Conseils IA du début / de la fin du mois : générés en arrière-plan s'ils manquent.
+    if (!achieved && goals.length) void ensureGoalTips(req.user!._id);
+    return res.json({ success: true, data });
   } catch (error) {
     console.error('Erreur get goals:', error);
     return res.status(500).json({
       success: false,
       message: 'Erreur lors de la récupération des objectifs',
     });
+  }
+});
+
+/** Marque l'objectif comme réalisé : il passe dans l'historique. */
+router.post('/:id/achieve', async (req: Request, res: Response) => {
+  try {
+    const goal = await SavingsGoal.findOneAndUpdate(
+      { _id: req.params.id, user_id: req.user!._id, achieved_at: null },
+      { $set: { achieved_at: new Date() } },
+      { new: true }
+    ).lean();
+    if (!goal) {
+      return res.status(404).json({ success: false, message: 'Objectif introuvable ou déjà atteint' });
+    }
+    const [data] = await enrichGoals(req.user!._id, [goal], req.user!.currency || 'XAF');
+    return res.json({ success: true, data, message: 'Objectif atteint' });
+  } catch (error) {
+    console.error('Erreur achieve goal:', error);
+    return res.status(500).json({ success: false, message: 'Erreur lors de la mise à jour' });
   }
 });
 
@@ -117,6 +132,7 @@ router.put('/:id', async (req: Request, res: Response) => {
     if (value.target_amount !== undefined) goal.target_amount = value.target_amount;
     if (value.deadline !== undefined) goal.deadline = value.deadline;
 
+    if (!goal.achieved_at && (goal.saved_amount ?? 0) >= goal.target_amount) goal.achieved_at = new Date();
     await goal.save();
 
     const current = goal.saved_amount ?? 0;

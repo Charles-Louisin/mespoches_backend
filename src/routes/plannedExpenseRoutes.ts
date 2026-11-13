@@ -8,6 +8,7 @@ import {
   normalizeScheduledDate,
 } from '../services/plannedExpenseService';
 import { isFutureUtcDay } from '../utils/plannedExpenseDates';
+import { createExpenseTransaction } from '../services/walletTransaction';
 import { parseListPage, listMeta } from '../utils/pagination';
 import { CATEGORY_LIST_SELECT, WALLET_LIST_SELECT } from '../utils/projections';
 
@@ -130,6 +131,50 @@ router.post('/', protect, async (req: Request, res: Response) => {
       success: false,
       message: 'Erreur lors de la création de la dépense prévue',
     });
+  }
+});
+
+/**
+ * Règle une dépense future avant son échéance : la poche couvre déjà le montant, l'utilisateur valide.
+ * La transaction est datée d'aujourd'hui et la dépense prévue passe en « exécutée ».
+ */
+router.post('/:id/settle', protect, async (req: Request, res: Response) => {
+  try {
+    const claimed = await PlannedExpense.findOneAndUpdate(
+      { _id: req.params.id, user_id: req.user!._id, status: 'scheduled', execution_claimed_at: null },
+      { $set: { execution_claimed_at: new Date() } },
+      { new: true }
+    );
+    if (!claimed) {
+      return res.status(404).json({ success: false, message: 'Dépense prévue introuvable ou déjà réglée' });
+    }
+    try {
+      const transaction = await createExpenseTransaction({
+        userId: req.user!._id,
+        data: {
+          amount: claimed.amount,
+          wallet_id: String(claimed.wallet_id),
+          category_id: claimed.category_id ? String(claimed.category_id) : null,
+          description: claimed.description,
+          date: new Date(),
+        },
+      });
+      claimed.status = 'executed';
+      claimed.executed_transaction_id = transaction._id as typeof claimed.executed_transaction_id;
+      claimed.cancelled_reason = null;
+      await claimed.save();
+      return res.json({ success: true, data: { planned: claimed, transactionId: String(transaction._id) }, message: 'Dépense réglée' });
+    } catch (err) {
+      claimed.execution_claimed_at = null;
+      await claimed.save();
+      return res.status(400).json({
+        success: false,
+        message: err instanceof Error && /Solde insuffisant/.test(err.message) ? 'Solde insuffisant sur cette poche' : 'Règlement impossible',
+      });
+    }
+  } catch (error) {
+    console.error('Erreur settle planned expense:', error);
+    return res.status(500).json({ success: false, message: 'Erreur lors du règlement' });
   }
 });
 

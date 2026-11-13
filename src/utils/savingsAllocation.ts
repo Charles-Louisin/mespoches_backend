@@ -53,6 +53,7 @@ export async function allocateToSavingsGoal(
   }
 
   goal.saved_amount = (goal.saved_amount ?? 0) + input.amount;
+  if (!goal.achieved_at && goal.saved_amount >= goal.target_amount) goal.achieved_at = new Date();
   await goal.save();
 
   const desc =

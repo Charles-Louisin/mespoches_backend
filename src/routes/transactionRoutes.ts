@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { withLineCategories } from '../utils/lineCategories';
+import { matchCategoryOrLines } from '../utils/categorySplit';
 import Joi from 'joi';
 import mongoose, { FilterQuery, Types } from 'mongoose';
 import { mergeLineItems } from '../utils/lineItemsMerge';
@@ -14,6 +15,11 @@ import { resolveOwnedCategoryId } from '../utils/ownership';
 import { rejectIfLocked } from '../utils/planLocks';
 import { debitWallet, creditWallet } from '../services/walletTransaction';
 import { parseListPage, listMeta } from '../utils/pagination';
+import BatchJob from '../models/BatchJob';
+import PlannedExpense from '../models/PlannedExpense';
+import User from '../models/User';
+import { notifyExpoPush } from '../utils/expoPush';
+import { normalizeScheduledDate } from '../services/plannedExpenseService';
 import {
   CATEGORY_LIST_SELECT,
   SAVINGS_LIST_SELECT,
@@ -289,10 +295,190 @@ async function deleteTransferGroup(
   });
 }
 
+/* ─────────────── Enregistrement en lot (plusieurs poches en une validation) ─────────────── */
+
+const batchGroupSchema = Joi.object({
+  kind: Joi.string().valid('expense', 'income').required(),
+  wallet_id: Joi.string().hex().length(24).required(),
+  category_id: Joi.string().hex().length(24).allow(null, ''),
+  description: Joi.string().allow('', null).max(200),
+  date: Joi.alternatives().try(Joi.date().iso(), Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/)).optional(),
+  line_items: Joi.array().items(lineItemSchema).min(1).max(50).required(),
+});
+
+const batchSchema = Joi.object({
+  groups: Joi.array().items(batchGroupSchema).min(1).max(100).required(),
+});
+
+type BatchGroup = {
+  kind: 'expense' | 'income';
+  wallet_id: string;
+  category_id?: string | null;
+  description?: string | null;
+  date?: Date | string;
+  line_items: NonNullable<TransactionInput['line_items']>;
+};
+
+/** Au-delà, le lot part en arrière-plan avec suivi de progression ; en deçà, réponse immédiate. */
+const BATCH_SYNC_MAX_GROUPS = 3;
+const BATCH_SYNC_MAX_LINES = 15;
+
+function groupTotal(g: BatchGroup): number {
+  return g.line_items.reduce((s, l) => s + (Number(l.amount) || 0), 0);
+}
+
+/** Une transaction du lot. Dépense datée dans le futur → dépense prévue (montant total, une échéance). */
+async function saveBatchGroup(userId: Types.ObjectId, g: BatchGroup): Promise<void> {
+  const date = g.date ? new Date(g.date) : new Date();
+  if (g.kind === 'expense' && isFutureUtcDay(date)) {
+    const wallet = await Wallet.findOne({ _id: g.wallet_id, user_id: userId, is_deleted: { $ne: true } }).select('_id').lean();
+    if (!wallet) throw new Error('Poche introuvable');
+    const categoryId = await resolveOwnedCategoryId(userId, g.category_id);
+    const lines = g.line_items.filter((l) => Number(l.amount) > 0);
+    await PlannedExpense.create({
+      user_id: userId,
+      wallet_id: g.wallet_id,
+      category_id: categoryId,
+      amount: groupTotal(g),
+      description:
+        g.description?.trim() || (lines.length > 1 ? lines.map((l) => l.description).filter(Boolean).join(', ').slice(0, 120) : lines[0]?.description || ''),
+      scheduled_date: normalizeScheduledDate(date),
+      status: 'scheduled',
+    });
+    return;
+  }
+  if (isFutureUtcDay(date)) throw new Error('Un revenu ne peut pas être daté dans le futur');
+  await createTransactionAndUpdateWallet({
+    userId,
+    type: g.kind,
+    data: {
+      amount: groupTotal(g),
+      wallet_id: g.wallet_id,
+      category_id: g.category_id || null,
+      description: g.description || null,
+      date,
+      line_items: g.line_items,
+    },
+  });
+}
+
+async function runBatchJob(jobId: Types.ObjectId, userId: Types.ObjectId, groups: BatchGroup[]): Promise<void> {
+  let done = 0;
+  let failed = 0;
+  let units = 0;
+  const errors: { index: number; message: string }[] = [];
+  for (let i = 0; i < groups.length; i++) {
+    const g = groups[i];
+    try {
+      await saveBatchGroup(userId, g);
+      done++;
+    } catch (err) {
+      failed++;
+      errors.push({ index: i, message: err instanceof Error ? err.message : 'Échec' });
+    }
+    units += g.line_items.length;
+    // Écriture de progression à chaque transaction : le pourcentage affiché suit le travail réel.
+    await BatchJob.updateOne({ _id: jobId }, { $set: { done, failed, done_units: units, failures: errors } }).catch(() => undefined);
+  }
+  await BatchJob.updateOne({ _id: jobId }, { $set: { status: 'done', finished_at: new Date() } }).catch(() => undefined);
+
+  const user = await User.findById(userId).select('expoPushToken').lean();
+  if (user?.expoPushToken) {
+    await notifyExpoPush({
+      tokens: [user.expoPushToken],
+      title: failed ? 'Enregistrement terminé avec des erreurs' : 'Tout est enregistré',
+      body: failed
+        ? `${done} transaction${done > 1 ? 's' : ''} enregistrée${done > 1 ? 's' : ''}, ${failed} en échec. Ouvrez l’app pour les reprendre.`
+        : `${done} transaction${done > 1 ? 's' : ''} enregistrée${done > 1 ? 's' : ''}. Vos poches sont à jour.`,
+      channelId: 'mes_poches_transactions',
+      data: { type: 'batch-done', screen: 'transactions', jobId: String(jobId) },
+    });
+  }
+}
+
+function batchView(job: { _id: unknown; status: string; total: number; done: number; failed: number; total_units: number; done_units: number; failures: { index: number; message: string }[] }) {
+  const percent = job.total_units > 0 ? Math.floor((job.done_units / job.total_units) * 100) : 100;
+  return {
+    id: String(job._id),
+    status: job.status,
+    total: job.total,
+    done: job.done,
+    failed: job.failed,
+    percent: job.status === 'done' ? 100 : Math.min(99, percent),
+    errors: job.failures,
+  };
+}
+
+router.post('/batch', protect, async (req: Request, res: Response) => {
+  try {
+    const { error, value } = batchSchema.validate(req.body);
+    if (error) {
+      return res.status(400).json({ success: false, message: error.details[0].message });
+    }
+    const groups = value.groups as BatchGroup[];
+    if (
+      await rejectIfLocked(res, req.user!, {
+        wallets: groups.map((g) => g.wallet_id),
+        categories: groups.flatMap((g) => [g.category_id, ...g.line_items.map((l) => l.category_id)]),
+      })
+    ) {
+      return;
+    }
+    const userId = req.user!._id;
+    const lines = groups.reduce((s, g) => s + g.line_items.length, 0);
+
+    if (groups.length <= BATCH_SYNC_MAX_GROUPS && lines <= BATCH_SYNC_MAX_LINES) {
+      const errors: { index: number; message: string }[] = [];
+      let done = 0;
+      for (let i = 0; i < groups.length; i++) {
+        try {
+          await saveBatchGroup(userId, groups[i]);
+          done++;
+        } catch (err) {
+          errors.push({ index: i, message: err instanceof Error ? err.message : 'Échec' });
+        }
+      }
+      return res.status(errors.length && !done ? 400 : 201).json({
+        success: done > 0,
+        message: errors.length && !done ? errors[0].message : undefined,
+        data: { id: null, status: 'done', total: groups.length, done, failed: errors.length, percent: 100, errors },
+      });
+    }
+
+    const job = await BatchJob.create({ user_id: userId, total: groups.length, total_units: lines });
+    // Réponse immédiate ; le serveur continue seul, l'app suit la progression.
+    setImmediate(() => {
+      runBatchJob(job._id as Types.ObjectId, userId, groups).catch((err) => console.error('Lot de transactions:', err));
+    });
+    return res.status(202).json({ success: true, data: batchView(job) });
+  } catch (error) {
+    console.error('Erreur batch:', error);
+    return res.status(500).json({ success: false, message: "Erreur lors de l'enregistrement" });
+  }
+});
+
+router.get('/batch/:id', protect, async (req: Request, res: Response) => {
+  try {
+    if (!Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ success: false, message: 'Introuvable' });
+    const job = await BatchJob.findOne({ _id: req.params.id, user_id: req.user!._id }).lean();
+    if (!job) return res.status(404).json({ success: false, message: 'Introuvable' });
+    res.set('Cache-Control', 'no-store');
+    return res.json({ success: true, data: batchView(job) });
+  } catch (error) {
+    console.error('Erreur batch status:', error);
+    return res.status(500).json({ success: false, message: 'Erreur serveur' });
+  }
+});
+
 router.get('/', protect, async (req: Request, res: Response) => {
   try {
     const { wallet_id, type, startDate, endDate } = req.query;
     const query: FilterQuery<ITransaction> = { user_id: req.user!._id };
+    // Historique d'une catégorie : la transaction OU une de ses lignes (articles) est dans cette catégorie.
+    const categoryId = typeof req.query.category_id === 'string' && Types.ObjectId.isValid(req.query.category_id)
+      ? new Types.ObjectId(req.query.category_id)
+      : null;
+    if (categoryId) query.$and = [matchCategoryOrLines([categoryId])];
 
     if (typeof wallet_id === 'string') {
       query.wallet_id = wallet_id;
@@ -321,7 +507,7 @@ router.get('/', protect, async (req: Request, res: Response) => {
         { type: 'transfer', is_transfer_mirror: { $ne: true } },
       ],
     })
-      .select(TX_LIST_SELECT)
+      .select(categoryId ? `${TX_LIST_SELECT} line_items.amount line_items.category_id` : TX_LIST_SELECT)
       .populate('wallet_id', WALLET_LIST_SELECT)
       .populate('destination_wallet_id', WALLET_LIST_SELECT)
       .populate('category_id', CATEGORY_LIST_SELECT)

@@ -19,6 +19,7 @@ export type MonthStats = {
 }
 
 export type CategoryStat = {
+  categoryId: string | null
   category: string
   total: number
   count: number
@@ -87,7 +88,7 @@ export async function getCategoryStats(
   end: Date
 ): Promise<CategoryStat[]> {
   // Une transaction à plusieurs lignes de catégories différentes compte dans chacune (montant de la ligne).
-  const rows = await Transaction.aggregate<{ category: string; total: number; count: number }>([
+  const rows = await Transaction.aggregate<CategoryStat>([
     {
       $match: {
         user_id: userId,
@@ -116,6 +117,7 @@ export async function getCategoryStats(
     {
       $project: {
         _id: 0,
+        categoryId: { $toString: '$_id' },
         category: { $ifNull: ['$cat.name', 'Sans catégorie'] },
         total: 1,
         count: 1,

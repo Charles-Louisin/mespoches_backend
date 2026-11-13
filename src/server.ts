@@ -1,5 +1,8 @@
 import './loadEnv';
 import express from 'express';
+import cluster from 'cluster';
+import os from 'os';
+import compression from 'compression';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
@@ -24,6 +27,8 @@ import feedbackRoutes from './routes/feedbackRoutes';
 import appVersionRoutes from './routes/appVersionRoutes';
 import adminReleaseRoutes from './routes/adminReleaseRoutes';
 import { startPlannedExpenseScheduler } from './jobs/plannedExpenseScheduler';
+import { startGoalTipsScheduler } from './jobs/goalTipsScheduler';
+import { fundingWatchMiddleware } from './services/fundingWatch';
 import { assertSetupAccess } from './utils/setupAccess';
 import { sanitizeMongoKeys } from './middleware/sanitize';
 import { apiLimiter } from './utils/security';
@@ -126,6 +131,8 @@ app.use(
 );
 app.use(requestTimeout);
 app.use(requestMetrics);
+// Réponses JSON compressées (listes de transactions, analyses) : beaucoup moins de données sur le réseau mobile.
+app.use(compression({ threshold: 1024 }));
 
 // Corps brut conservé pour les webhooks signés (HMAC calculé sur les octets reçus, jamais re-sérialisés).
 const jsonSmall = express.json({
@@ -149,6 +156,8 @@ app.use((req, res, next) => {
 app.use(express.urlencoded({ extended: true, limit: '256kb' }));
 app.use(sanitizeMongoKeys);
 app.use(apiLimiter);
+// Après chaque écriture : dépenses futures devenues réglables, objectifs devenus réalisables (push).
+app.use(fundingWatchMiddleware);
 
 app.use(
   morgan(isProduction ? 'combined' : 'dev', {
@@ -305,13 +314,18 @@ async function startServer(): Promise<void> {
   await connectDatabase();
   logStartupBanner(true);
 
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     startPlannedExpenseScheduler();
+    startGoalTipsScheduler();
     void logPublicIp();
     if (!isProduction) {
       console.log(`👀 Mode ${NODE_ENV} — logs détaillés activés (morgan)\n`);
     }
   });
+  // Connexions keep-alive gardées plus longtemps que celles du proxy (évite les 502 sous charge).
+  server.keepAliveTimeout = 65_000;
+  server.headersTimeout = 66_000;
+  server.maxConnections = Number(process.env.MAX_CONNECTIONS || 0) || server.maxConnections;
 }
 
 /** Affiche l'IP publique sortante au démarrage (local comme Railway) pour la whitelist SasPay. */
@@ -332,7 +346,25 @@ async function logPublicIp(): Promise<void> {
   console.log('──────────────────────────────────────────\n');
 }
 
-startServer().catch((err) => {
-  console.error('❌ Erreur au démarrage du serveur:', err);
-  process.exit(1);
-});
+/**
+ * WEB_CONCURRENCY=n (ou « auto ») : un processus par cœur, le port partagé par le module cluster.
+ * Les tâches planifiées sont protégées par des verrous Mongo : aucune ne tourne en double.
+ */
+const workers =
+  process.env.WEB_CONCURRENCY === 'auto'
+    ? os.availableParallelism()
+    : Math.max(1, Number(process.env.WEB_CONCURRENCY) || 1);
+
+if (workers > 1 && cluster.isPrimary) {
+  console.log(`🧵 ${workers} processus (WEB_CONCURRENCY)`);
+  for (let i = 0; i < workers; i++) cluster.fork();
+  cluster.on('exit', (worker, code) => {
+    console.warn(`⚠️  Processus ${worker.process.pid} arrêté (code ${code}), redémarrage`);
+    cluster.fork();
+  });
+} else {
+  startServer().catch((err) => {
+    console.error('❌ Erreur au démarrage du serveur:', err);
+    process.exit(1);
+  });
+}

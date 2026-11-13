@@ -111,9 +111,17 @@ export const aiScanLimiter = rateLimit({
 export const apiLimiter = rateLimit({
   ...rateLimitBase,
   windowMs: 15 * 60 * 1000,
-  max: 400,
-  keyGenerator: (req) => `api:${clientIp(req)}`,
+  max: 600,
+  // Par session (jeton) plutôt que par IP : sur les réseaux mobiles, des milliers d'abonnés partagent la même IP.
+  keyGenerator: (req) => {
+    const auth = req.headers.authorization;
+    if (typeof auth === 'string' && auth.startsWith('Bearer ') && auth.length > 20) {
+      return `api:tok:${crypto.createHash('sha1').update(auth.slice(7)).digest('base64url').slice(0, 22)}`;
+    }
+    return `api:${clientIp(req)}`;
+  },
   skip: (req) =>
+    /^\/api\/transactions\/batch\/[0-9a-f]{24}$/.test(req.path) ||
     req.path === '/api/health' ||
     req.path === '/api/metrics' ||
     req.path.startsWith('/api/webhooks') ||

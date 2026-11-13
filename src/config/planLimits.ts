@@ -38,7 +38,7 @@ export const TIER_DEFS: Record<SubscriptionTier, TierDef> = {
   pro: {
     label: 'Pro',
     priceXaf: 2500,
-    categories: 20,
+    categories: 100,
     wallets: 20,
     scans: 30,
     voice: 30,
@@ -47,7 +47,7 @@ export const TIER_DEFS: Record<SubscriptionTier, TierDef> = {
   pro_plus: {
     label: 'Pro+',
     priceXaf: 6000,
-    categories: 50,
+    categories: 200,
     wallets: 50,
     scans: 100,
     voice: 100,

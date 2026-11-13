@@ -236,6 +236,22 @@ export class AIService {
     }
   }
 
+  /** Un conseil court et personnalisé par objectif d'épargne (début ou fin de mois). */
+  async goalTips(snapshot: unknown): Promise<Array<{ goalId: string; text: string }>> {
+    const messages = this.prompts.textMessages(
+      this.prompts.buildGoalTipsPrompt(JSON.stringify(snapshot).slice(0, 6000))
+    )
+    const { json } = await this.completeJson({ purpose: 'goal_tips', modality: 'text', messages })
+    const raw = (json as { tips?: unknown }).tips
+    if (!Array.isArray(raw)) return []
+    return raw
+      .map((t) => {
+        const item = t as { goal_id?: unknown; text?: unknown }
+        return { goalId: String(item.goal_id ?? ''), text: String(item.text ?? '').trim().slice(0, 240) }
+      })
+      .filter((t) => t.goalId && t.text)
+  }
+
   async enrichSms(
     rawSms: string,
     parsedSummary: string,
